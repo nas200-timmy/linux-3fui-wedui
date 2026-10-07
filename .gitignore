@@ -1,0 +1,47 @@
+# .NET
+bin/
+obj/
+publish/
+*.user
+
+# Node
+node_modules/
+dist/
+
+# 数据目录（本地运行产物）
+data/
+
+# 前端构建产物（由 npm run build / Docker 多阶段构建生成）
+src/3fui-server/wwwroot/
+
+# 密钥与证书
+*.key
+*.pem
+certs/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.vs/
+.idea/
+*.suo
+
+# 本地环境（compose 变量等）
+.env
+.env.*
+!.env.example
+
+# 本地构建/运行残留
+*.tsbuildinfo
+*.log
+nohup.out
+
+# 开发会话导出（体积大，勿入库）
+kimi-export-session*.md
+kimi-docker*.md
+
+# 补丁失败残留（sync-upstream）
+*.orig
+*.rej

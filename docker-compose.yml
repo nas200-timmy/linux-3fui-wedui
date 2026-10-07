@@ -1,0 +1,54 @@
+# linux-3fui · 面向 NAS 的部署编排
+# 用法：docker compose up -d
+# 构建本地镜像：docker compose build
+
+services:
+  linux-3fui-2:
+    image: linux-3fui-2:latest   # 本地构建的镜像
+    build:
+      context: .
+    container_name: linux-3fui-2
+    restart: unless-stopped
+    ports:
+      - "8080:8080"        # HTTP（TLS 启用后自动 301 跳转 HTTPS）
+      - "8443:8443"        # HTTPS（在网页「设置」上传证书即启用）
+      - "10591:10591/udp"  # 远程调用（与 Windows 版 3FUI 协议一致）
+    volumes:
+      - ${DATA_DIR:-./data}:/data   # 设置 / 预设 / 队列缓存 / HTTPS 证书
+                                    # 默认用仓库内 ./data；要把它放到仓库外（推荐，避免私钥/口令
+                                    # 混进版本库），在同目录 .env 里写 DATA_DIR=<绝对路径> 即可
+      - /vol2/1000/影视多媒体资源:/media   # 媒体根目录
+    environment:
+      - HTTP_PORT=8080
+      - HTTPS_PORT=8443
+      - MEDIA_ROOT=/media
+      # 声明式 HTTPS（可选）：证书文件挂载进容器，启动即生效，无需网页上传
+      # - TLS_CERT_PATH=/data/certs/tls.crt
+      # - TLS_KEY_PATH=/data/certs/tls.key
+      # 时区（日志时间）
+      - TZ=Asia/Shanghai
+      # NVIDIA NVENC（配合下方 runtime: nvidia；video 能力集负责注入 NVENC 驱动库）
+      # - NVIDIA_VISIBLE_DEVICES=all
+      # - NVIDIA_DRIVER_CAPABILITIES=all
+    # ── 硬件加速 ──
+    # Intel QSV / VAAPI：把 /dev/dri 透传进容器（renderD128=Intel 核显，renderD129=独显）
+    # 容器以 uid 1000 运行，需补上宿主的 video/render 组才能访问设备节点。
+    # 注意：group_add 写组名是按「镜像内」/etc/group 解析的（debian 基础镜像没有 render 组），
+    # 必须用宿主 GID 数字。本机 render=992（原 NAS 是 105，换机器用 getent group render 确认）
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "44"    # 宿主 video 组（card0/card1 节点属组）
+      - "105"   # 宿主 render 组（renderD128/129 节点属组）
+    # NVIDIA NVENC：宿主机已安装 NVIDIA Container Toolkit（RTX 3070 Mobile）
+    # runtime: nvidia（本机无 NVIDIA，部署闸已确认）
+    # ── 权限说明 ──
+    # 媒体目录属主通常是宿主 uid 1000，因此覆盖容器运行用户：
+    user: "1000:1001"
+    healthcheck:
+      # /api/status 在启用登录认证后返回 401；/api/auth/status 是公开端点，可证明进程存活
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/auth/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

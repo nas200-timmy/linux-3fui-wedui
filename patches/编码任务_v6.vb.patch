@@ -1,0 +1,71 @@
+--- "/home/coder/code/kimi-deepseek-reverse-rroxy-fnos-aliyunecs/FFmpegFreeUI/FFmpegFreeUI/\345\212\237\350\203\275/\347\274\226\347\240\201\344\273\273\345\212\241_v6.vb"	2026-09-21 23:12:44.138356770 +0800
++++ "src/3fui-core/\345\274\225\346\223\216/\347\274\226\347\240\201\344\273\273\345\212\241_v6.vb"	2026-09-21 23:39:27.670575422 +0800
+@@ -502,7 +502,7 @@
+             process.BeginOutputReadLine()
+             process.BeginErrorReadLine()
+             编码队列_v6.通知任务更新(Me)
+-            If 设置_v6.实例对象.指定处理器核心 <> "" Then
++            If 设置_v6.实例对象.指定处理器核心 <> "" AndAlso OperatingSystem.IsWindows() Then
+                 Try
+                     process.ProcessorAffinity = GetAffinityMask(设置_v6.实例对象.指定处理器核心.Split(","c).Select(Function(s) s.Trim()).Where(Function(s) Integer.TryParse(s, Nothing)).Select(Function(s) Integer.Parse(s)).ToArray())
+                 Catch ex As InvalidOperationException
+@@ -604,7 +604,7 @@
+             Dim changed As Boolean = False
+             SyncLock 状态锁
+                 If 状态 = 编码任务状态_v6.正在处理 AndAlso 当前进程 IsNot Nothing AndAlso Not 当前进程.HasExited Then
+-                    If NtSuspendProcess(当前进程.Handle) = 0 Then
++                    If 挂起进程(当前进程) Then
+                         状态 = 编码任务状态_v6.已暂停
+                         任务耗时计时器.Stop()
+                         changed = True
+@@ -626,7 +626,7 @@
+             Dim changed As Boolean = False
+             SyncLock 状态锁
+                 If 状态 = 编码任务状态_v6.已暂停 AndAlso 当前进程 IsNot Nothing AndAlso Not 当前进程.HasExited Then
+-                    If NtResumeProcess(当前进程.Handle) = 0 Then
++                    If 恢复进程(当前进程) Then
+                         状态 = 编码任务状态_v6.正在处理
+                         任务耗时计时器.Start()
+                         changed = True
+@@ -730,7 +730,7 @@
+         If raw = "" Then Return raw
+         Try
+             If Path.IsPathRooted(raw) Then Return raw
+-            Return Path.GetFullPath(Path.Combine(Application.StartupPath, raw))
++            Return Path.GetFullPath(Path.Combine(路径助手.数据目录, raw))
+         Catch
+             Return raw
+         End Try
+@@ -772,8 +772,14 @@
+         Try
+             Select Case 设置_v6.实例对象.任务失败自动删除输出文件
+                 Case 0
+-                    FileIO.FileSystem.DeleteFile(输出文件, FileIO.UIOption.OnlyErrorDialogs, FileIO.RecycleOption.SendToRecycleBin)
+-                    追加日志($"[3FUI] {触发原因}后已将报废 MP4 输出文件删除到回收站", 编码任务日志类别_v6.系统, 当前步骤, False, False)
++                    ' Windows：移入回收站。Linux 无回收站，退化为永久删除。
++                    Try
++                        FileIO.FileSystem.DeleteFile(输出文件, FileIO.UIOption.OnlyErrorDialogs, FileIO.RecycleOption.SendToRecycleBin)
++                        追加日志($"[3FUI] {触发原因}后已将报废 MP4 输出文件删除到回收站", 编码任务日志类别_v6.系统, 当前步骤, False, False)
++                    Catch ex As Exception When Not OperatingSystem.IsWindows()
++                        File.Delete(输出文件)
++                        追加日志($"[3FUI] {触发原因}后已删除报废 MP4 输出文件（Linux 无回收站）", 编码任务日志类别_v6.系统, 当前步骤, False, False)
++                    End Try
+                 Case 1
+                     FileIO.FileSystem.DeleteFile(输出文件, FileIO.UIOption.OnlyErrorDialogs, FileIO.RecycleOption.DeletePermanently)
+                     追加日志($"[3FUI] {触发原因}后已永久删除报废 MP4 输出文件", 编码任务日志类别_v6.系统, 当前步骤, False, False)
+@@ -810,6 +816,7 @@
+     End Function
+ 
+     Private Shared Sub 设定系统状态_v6()
++        If Not OperatingSystem.IsWindows() Then Exit Sub
+         Select Case 设置_v6.实例对象.有任务时系统保持状态选项
+             Case 0
+                 SetThreadExecutionState(EXECUTION_STATE.ES_CONTINUOUS Or EXECUTION_STATE.ES_SYSTEM_REQUIRED)
+@@ -821,6 +828,7 @@
+     End Sub
+ 
+     Private Shared Sub 恢复系统状态_v6()
++        If Not OperatingSystem.IsWindows() Then Exit Sub
+         SetThreadExecutionState(EXECUTION_STATE.ES_CONTINUOUS)
+     End Sub
+ End Class

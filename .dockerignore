@@ -1,0 +1,33 @@
+# VCS
+.git
+.gitignore
+.gitattributes
+.env
+
+# .NET 构建产物
+**/bin
+**/obj
+**/publish
+
+# Node 依赖与构建产物
+**/node_modules
+**/dist
+src/3fui-web/tsconfig.tsbuildinfo
+
+# 前端构建产物（Docker 多阶段构建内部生成）
+src/3fui-server/wwwroot
+
+# 本地数据与密钥
+data
+**/*.key
+**/*.pem
+certs
+
+# 不参与镜像构建的内容
+tests
+docs
+patches
+tools
+*.md
+LICENSE
+.DS_Store

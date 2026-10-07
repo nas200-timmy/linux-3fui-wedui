@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FFmpegFreeUI</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <MyType>Empty</MyType>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Version>6.2.26</Version>
+    <AssemblyVersion>6.2.26</AssemblyVersion>
+    <FileVersion>6.2.26</FileVersion>
+    <Description>linux-3fui 核心库：移植自 FFmpegFreeUI v6 的纯逻辑（预设数据模型与 ffmpeg 命令行生成），与上游保持逐文件一致。</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="3fui-server" />
+  </ItemGroup>
+
+</Project>

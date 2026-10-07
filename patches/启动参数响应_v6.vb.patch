@@ -1,0 +1,44 @@
+--- "/home/coder/code/kimi-deepseek-reverse-rroxy-fnos-aliyunecs/FFmpegFreeUI/FFmpegFreeUI/\345\212\237\350\203\275/\345\220\257\345\212\250\345\217\202\346\225\260\345\223\215\345\272\224_v6.vb"	2026-09-21 23:12:44.137321447 +0800
++++ "src/3fui-core/\345\274\225\346\223\216/\345\220\257\345\212\250\345\217\202\346\225\260\345\223\215\345\272\224_v6.vb"	2026-09-21 23:36:04.669312552 +0800
+@@ -41,7 +41,7 @@
+                     处理FFmpeg参数(args, i, state)
+                     Exit While
+                 Case "-test"
+-                    MsgBox("哔哔", MsgBoxStyle.Information)
++                    ' linux-3fui 适配：无窗口可弹，-test 仅作解析兼容。
+                 Case "-i"
+                     If i < args.Count - 1 Then
+                         state.输入文件 = args(i + 1)
+@@ -67,7 +67,8 @@
+         End While
+ 
+         If state.独立命令行 <> "" Then
+-            插件管理.使用命令行添加任务到编码队列(
++            ' linux-3fui 适配：上游经插件管理转发，此处直接调用队列的公开 API（行为一致）。
++            编码队列_v6.添加命令行任务(
+                 state.独立命令行,
+                 If(state.独立命令行任务名 <> "", state.独立命令行任务名, $"外部命令行任务 {Now:HHmmss}"),
+                 "",
+@@ -127,19 +128,14 @@
+             If File.Exists(candidate) Then Return candidate
+         Next
+ 
+-        Dim oldCandidate = Path.Combine(Application.StartupPath, "Preset", fileName)
++        Dim oldCandidate = Path.Combine(路径助手.数据目录, "Preset", fileName)
+         If File.Exists(oldCandidate) Then Return oldCandidate
+         Return ""
+     End Function
+ 
+     Private Shared Sub 应用剪辑区间到当前参数面板(入点 As String, 出点 As String)
+-        If 入点 = "" AndAlso 出点 = "" Then Exit Sub
+-        Try
+-            If 入点 <> "" Then Form_v6_参数面板.私有界面_剪辑区间.MTB_入点.Text = 入点
+-            If 出点 <> "" Then Form_v6_参数面板.私有界面_剪辑区间.MTB_出点.Text = 出点
+-            Form_v6_参数面板.私有界面_剪辑区间.MCB_剪辑模式.SelectedIndex = CInt(预设数据_v6.剪辑方法.粗剪)
+-        Catch
+-        End Try
++        ' linux-3fui 适配：无参数面板可应用。仅带剪辑点不带 -i/-3fui_file 的远程调用
++        ' 在 Windows 版中作用于当前打开的面板；服务端没有"当前面板"概念，忽略之。
+     End Sub
+ 
+     Private Shared Sub 处理FFmpeg参数(args As List(Of String), startIndex As Integer, state As 接收参数状态)

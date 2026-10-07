@@ -1,0 +1,58 @@
+--- "/home/coder/code/kimi-deepseek-reverse-rroxy-fnos-aliyunecs/FFmpegFreeUI/FFmpegFreeUI/\345\212\237\350\203\275/\347\274\226\347\240\201\351\230\237\345\210\227_v6.vb"	2026-09-21 23:12:44.138356770 +0800
++++ "src/3fui-core/\345\274\225\346\223\216/\347\274\226\347\240\201\351\230\237\345\210\227_v6.vb"	2026-09-21 23:39:27.670575422 +0800
+@@ -112,7 +112,7 @@
+ 
+     Public Shared ReadOnly Property 未处理任务缓存文件路径 As String
+         Get
+-            Return Path.Combine(Application.StartupPath, 未处理任务缓存文件名)
++            Return Path.Combine(路径助手.数据目录, 未处理任务缓存文件名)
+         End Get
+     End Property
+ 
+@@ -310,24 +310,8 @@
+         Return task
+     End Function
+ 
+-    Public Shared Function 添加来自参数面板的文件(files As IEnumerable(Of String), 参数面板 As Form_v6_参数面板) As Integer
+-        If files Is Nothing OrElse 参数面板 Is Nothing Then Return 0
+-        Dim preset = 预设管理_v6.从面板创建预设(参数面板)
+-        Dim expanded As New List(Of String)
+-        For Each file In files
+-            If String.IsNullOrWhiteSpace(file) Then Continue For
+-            If Directory.Exists(file) Then
+-                For Each child In Directory.GetFiles(file, "*", SearchOption.AllDirectories)
+-                    expanded.Add(If(设置_v6.实例对象.转译模式, 转译模式处理路径(child), child))
+-                Next
+-            Else
+-                expanded.Add(If(设置_v6.实例对象.转译模式, 转译模式处理路径(file), file))
+-            End If
+-        Next
+-        If expanded.Count = 0 Then Return 0
+-        If Not 预设管理_v6.验证可添加任务(preset) Then Return 0
+-        Return 批量添加预设任务(expanded, preset).Count
+-    End Function
++    ' linux-3fui 适配：删除上游"从参数面板添加文件"入口（依赖 WinForms 面板）。
++    ' Web 服务端直接调用 批量添加预设任务 / 添加预设任务。
+ 
+     Public Shared Function 同步未处理预设任务(预设数据 As 预设数据_v6) As 预设同步结果
+         Return 同步预设任务核心(Nothing, 预设数据)
+@@ -712,17 +696,9 @@
+             完成提示待播放 = False
+             全部任务已完成是否有错误 = False
+         End SyncLock
++        ' linux-3fui 适配：服务端无音频输出，提示音播放整体移除（上游为 My.Computer.Audio.Play）。
+         If shouldPlay AndAlso 设置_v6.实例对象.提示音选项 = 0 Then
+-            Try
+-                If hasError Then
+-                    Sound_Error.Position = 0
+-                    My.Computer.Audio.Play(Sound_Error, AudioPlayMode.Background)
+-                Else
+-                    Sound_Finish.Position = 0
+-                    My.Computer.Audio.Play(Sound_Finish, AudioPlayMode.Background)
+-                End If
+-            Catch
+-            End Try
++            ' 无操作：linux-3fui 不播放声音。
+         End If
+     End Sub
+ 

@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/3fui-core/3fui-core.vbproj" />
+    <Project Path="src/3fui-server/3fui-server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/3fui-core.Tests/3fui-core.Tests.csproj" />
+  </Folder>
+</Solution>

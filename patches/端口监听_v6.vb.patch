@@ -1,0 +1,31 @@
+--- "/home/coder/code/kimi-deepseek-reverse-rroxy-fnos-aliyunecs/FFmpegFreeUI/FFmpegFreeUI/\345\212\237\350\203\275/\347\253\257\345\217\243\347\233\221\345\220\254_v6.vb"	2026-09-21 23:12:44.138356770 +0800
++++ "src/3fui-core/\345\274\225\346\223\216/\347\253\257\345\217\243\347\233\221\345\220\254_v6.vb"	2026-09-21 23:35:49.964642604 +0800
+@@ -34,7 +34,7 @@
+                 取消令牌源 = Nothing
+                 监听任务 = Nothing
+                 设置_v6.实例对象.是否监听端口 = False
+-                UI线程执行(Sub() MsgBox("远程调用监听启动失败：" & ex.Message, MsgBoxStyle.Exclamation))
++                ' linux-3fui 适配：无窗口可弹，监听失败仅落日志（由服务端日志组件记录）。
+             End Try
+         End SyncLock
+     End Sub
+@@ -87,17 +87,10 @@
+     End Sub
+ 
+     Private Shared Sub UI线程执行(action As Action)
++        ' linux-3fui 适配：无 WinForms 消息循环，直接执行（调用点已保证线程安全）。
+         If action Is Nothing Then Exit Sub
+         Try
+-            If FormMain_v6 IsNot Nothing AndAlso FormMain_v6.IsHandleCreated AndAlso Not FormMain_v6.IsDisposed Then
+-                If FormMain_v6.InvokeRequired Then
+-                    FormMain_v6.BeginInvoke(action)
+-                Else
+-                    action()
+-                End If
+-            Else
+-                action()
+-            End If
++            action()
+         Catch
+         End Try
+     End Sub

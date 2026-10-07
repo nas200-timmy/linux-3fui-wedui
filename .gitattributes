@@ -1,0 +1,29 @@
+# 统一换行符，避免 Windows 上 checkout 后 shell 脚本失效（CRLF 会让 #!/usr/bin/env bash 报错）
+* text=auto
+
+# 必须在容器/Linux 里执行的脚本固定 LF
+*.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+.gitignore text eol=lf
+
+# 源码固定 LF（上游 v6.2.26 副本已是 LF，统一口径避免 diff 噪音）
+*.vb text eol=lf
+*.cs text eol=lf
+*.csproj text eol=lf
+*.vbproj text eol=lf
+*.slnx text eol=lf
+*.ts text eol=lf
+*.vue text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+
+# 二进制（不要做换行转换）
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
