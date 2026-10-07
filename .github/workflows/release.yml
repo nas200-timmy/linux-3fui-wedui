@@ -1,0 +1,292 @@
+name: Release
+
+# 打 tag（v0.1.0）→ 出四类产物并创建 GitHub Release：
+#   ① ghcr.io 多架构镜像（linux/amd64 + linux/arm64）
+#   ② 单文件二进制 3fui-server-linux-x64 / -arm64（免安装，需宿主自带 ffmpeg）
+#   ③ 目录版 tar.gz（免安装、无 /tmp 自解压依赖，适合精简 NAS）
+#   ④ .deb / .rpm（amd64 + arm64，装到 /opt/linux-3fui，systemd 托管）
+# workflow_dispatch 手动跑：只构建产物、不创建 Release（便于验证流水线）。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不带 v；留空 = csproj 版本 + -dev.<run>）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write   # 创建 Release
+  packages: write   # 推 ghcr.io
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  NODE_VERSION: "22"
+  NFPM_VERSION: "2.47.0"
+
+jobs:
+  # ── 版本号：tag 去掉 v；手动跑用输入或 csproj 版本 + -dev.<run> ──
+  meta:
+    name: 解析版本
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_release: ${{ steps.v.outputs.is_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            is_release=true
+          elif [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+            is_release=false
+          else
+            base="$(grep -oPm1 '(?<=<Version>)[^<]+' src/3fui-server/3fui-server.csproj)"
+            version="${base}.dev.${GITHUB_RUN_NUMBER}"
+            is_release=false
+          fi
+          {
+            echo "version=${version}"
+            echo "is_release=${is_release}"
+          } >> "$GITHUB_OUTPUT"
+          echo "版本 = ${version}（创建 Release = ${is_release}）"
+
+  # ── 前端：vite 产物是 wwwroot，服务端发布要把它带上 ──
+  web:
+    name: 构建前端
+    runs-on: ubuntu-latest
+    needs: [meta]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: src/3fui-web/package-lock.json
+      - name: npm ci
+        working-directory: src/3fui-web
+        run: npm ci --no-audit --no-fund
+      - name: 构建（vue-tsc -b && vite build → ../3fui-server/wwwroot）
+        working-directory: src/3fui-web
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wwwroot
+          path: src/3fui-server/wwwroot
+          if-no-files-found: error
+          retention-days: 2
+
+  # ── 每个架构：目录发布 + 单文件 + deb/rpm + 冒烟 ──
+  binary:
+    name: 二进制与包（${{ matrix.arch }}）
+    runs-on: ubuntu-latest
+    needs: [meta, web]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            arch: amd64
+          - rid: linux-arm64
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: wwwroot
+          path: src/3fui-server/wwwroot
+
+      # 目录发布：deb/rpm/tar.gz 都用它。刻意不做单文件——
+      # 单文件首次启动要把原生库自解压到 /tmp，而不少 NAS 的 /tmp 是 noexec。
+      - name: dotnet publish（目录发布 → publish/）
+        run: |
+          set -euo pipefail
+          dotnet publish src/3fui-server/3fui-server.csproj \
+            -c Release -r ${{ matrix.rid }} --self-contained true --nologo \
+            -p:Version=${{ needs.meta.outputs.version }} \
+            -o publish
+
+      - name: 打目录版 tar.gz
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -C publish -czf "dist/linux-3fui-${{ needs.meta.outputs.version }}-${{ matrix.rid }}.tar.gz" .
+
+      # 免安装单文件（给"就想丢一个文件跑起来"的场景）
+      - name: dotnet publish（单文件 → dist/3fui-server-${{ matrix.rid }}）
+        run: |
+          set -euo pipefail
+          dotnet publish src/3fui-server/3fui-server.csproj \
+            -c Release -r ${{ matrix.rid }} --self-contained true --nologo \
+            -p:Version=${{ needs.meta.outputs.version }} \
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+            -o publish-single
+          cp publish-single/3fui-server "dist/3fui-server-${{ matrix.rid }}"
+          chmod +x "dist/3fui-server-${{ matrix.rid }}"
+
+      # 冒烟：真把服务起起来，验证 /api/status 与 SPA 首页（顺带验证 wwwroot 能被找到——
+      # 静态资源按 ContentRoot 解析，这里是"从别的目录启动"最容易出问题的地方）
+      - name: 冒烟测试（单文件：/api/status + 首页）
+        if: matrix.arch == 'amd64'   # arm64 产物无法在 x64 runner 上直接跑
+        run: |
+          set -euo pipefail
+          export DATA_DIR="$RUNNER_TEMP/data" HTTP_PORT=18080 HTTPS_PORT=18443
+          mkdir -p "$DATA_DIR"
+          "dist/3fui-server-${{ matrix.rid }}" > "$RUNNER_TEMP/server.log" 2>&1 &
+          pid=$!
+          ok=0
+          for _ in $(seq 1 40); do
+            if curl -fsS "http://127.0.0.1:18080/api/status" -o "$RUNNER_TEMP/status.json"; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::服务未起来，dump 日志与 stderr"
+            cat "$RUNNER_TEMP/server.log" || true
+            kill "$pid" 2>/dev/null || true
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/status.json"; echo
+          grep -q 'linux-3fui' "$RUNNER_TEMP/status.json"
+          curl -fsS "http://127.0.0.1:18080/" -o "$RUNNER_TEMP/index.html"
+          grep -qi 'id="app"' "$RUNNER_TEMP/index.html"   # 必须是构建好的 SPA，不是"前端未构建"兜底页
+          kill "$pid" 2>/dev/null || true
+          echo "冒烟通过：/api/status + SPA 首页"
+
+      - name: 安装 nfpm
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/nfpm.deb \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
+          sudo dpkg -i /tmp/nfpm.deb
+
+      - name: 打 deb / rpm
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+          nfpm package -f packaging/nfpm.yaml -p rpm -t dist/
+
+      # 打包是最容易悄悄错的地方（路径/权限/依赖），这里用 dpkg-deb 就地断言
+      - name: 校验包（布局 / 权限 / 依赖 / unit 语法）
+        run: |
+          set -euo pipefail
+          deb="$(ls dist/*.deb)"
+          echo "== $deb 控制信息 =="
+          dpkg-deb -I "$deb"
+          dpkg-deb -I "$deb" | grep -q 'Depends:.*ffmpeg'
+          dpkg-deb -I "$deb" | grep -q 'Recommends:.*intel-media-va-driver'
+          L="$(dpkg-deb -c "$deb")"
+          for p in '/opt/linux-3fui/3fui-server$' '/opt/linux-3fui/wwwroot/index.html$' \
+                   '/etc/systemd/system/linux-3fui.service$' '/etc/linux-3fui/env$' '/usr/bin/linux-3fui$'; do
+            echo "$L" | grep -qE "$p" || { echo "::error::包里缺少 $p"; exit 1; }
+          done
+          echo "$L" | grep -E '/opt/linux-3fui/3fui-server$' | grep -q '^-rwxr-xr-x'
+          echo "$L" | grep -E '/opt/linux-3fui/wwwroot/index.html$' | grep -q '^-rw-r--r--'
+          echo "$L" | grep -q 'linux-3fui/linux-3fui.*var/lib/linux-3fui/'
+          [ -s "$(ls dist/*.rpm)" ]
+          systemd-analyze verify packaging/linux-3fui.service || true   # 本地未安装二进制，只当语法检查
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 2
+
+  # ── 容器镜像：多架构推 ghcr.io（Node/.NET 阶段跑在宿主架构上，arm64 不做 QEMU 模拟编译） ──
+  image:
+    name: 容器镜像（ghcr.io）
+    runs-on: ubuntu-latest
+    needs: [meta]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          t="ghcr.io/${GITHUB_REPOSITORY}:${{ needs.meta.outputs.version }}"
+          if [ "${{ needs.meta.outputs.is_release }}" = "true" ]; then
+            t="${t},ghcr.io/${GITHUB_REPOSITORY}:latest"
+          fi
+          echo "tags=${t}" >> "$GITHUB_OUTPUT"
+          echo "镜像标签：${t}"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ needs.meta.outputs.version }}
+          tags: ${{ steps.tags.outputs.tags }}
+
+  # ── 只在打 tag 时创建 Release ──
+  release:
+    name: 创建 Release
+    runs-on: ubuntu-latest
+    needs: [meta, binary, image]
+    if: needs.meta.outputs.is_release == 'true'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: 写发布说明
+        run: |
+          set -euo pipefail
+          ls -la dist/
+          V="${{ needs.meta.outputs.version }}"
+          cat > "$RUNNER_TEMP/RELEASE_BODY.md" <<EOF
+          ## 安装方式（三选一，都自带网页前端）
+
+          ### ① 容器镜像（NAS 首选）
+          \`\`\`bash
+          docker pull ghcr.io/${GITHUB_REPOSITORY}:${V}
+          # 或在本仓库目录里把 docker-compose.yml 的 image 指向它，然后：
+          docker compose up -d
+          \`\`\`
+
+          ### ② deb / rpm（裸机，装到 /opt/linux-3fui，systemd 托管）
+          \`\`\`bash
+          sudo apt install ./linux-3fui_${V}-1_amd64.deb        # Debian/Ubuntu（arm64 同理）
+          sudo dnf install ./linux-3fui-${V}-1.x86_64.rpm       # Fedora/RHEL
+          # 装完改 /etc/linux-3fui/env 里的 MEDIA_ROOT，再 sudo systemctl restart linux-3fui
+          \`\`\`
+
+          ### ③ 免安装（宿主已自带 ffmpeg/ffprobe 与 libicu）
+          \`\`\`bash
+          tar -xzf linux-3fui-${V}-linux-x64.tar.gz -C /opt/linux-3fui
+          cd /opt/linux-3fui && MEDIA_ROOT=/你的媒体库 ./3fui-server
+          # 单文件版：./3fui-server-linux-x64（首次启动把原生库自解压到 /tmp；
+          # 若 /tmp 挂载是 noexec，请改用上面 tar.gz 目录版或设 DOTNET_BUNDLE_EXTRACT_BASE_DIR）
+          \`\`\`
+
+          打开 \`http://<主机IP>:8080\`。硬件加速（VAAPI/QSV/NVENC）需要宿主 /dev/dri 与对应驱动，见 README「裸机部署」。
+          EOF
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: ${{ runner.temp }}/RELEASE_BODY.md
+          fail_on_unmatched_files: true

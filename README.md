@@ -18,37 +18,78 @@ FFmpegFreeUI（3FUI）的 **Linux / 网页移植版**：为 NAS 打造的批量�
 
 ## 快速开始
 
-### Docker（推荐，NAS 通用）
+四种装法，按场景选一种（都自带网页前端）。版本号与下载地址见
+[Releases](https://github.com/nas200-timmy/linux-3fui-wedui/releases)。
+
+### ① 容器镜像（NAS 首选，不用本地构建）
 
 ```bash
-# 1. 复制 .env.example 为 .env，填好 DATA_DIR（数据目录，建议放仓库外）与
-#    MEDIA_HOST_DIR（宿主媒体库目录）——compose 会自动读取，不用命令行传
-# 2. 环境检查 + 构建 + 启动 + 硬件验证一条龙（amd64 与 arm64 均可）
-./tools/deploy.sh --build
-
-# 3. 打开
-#    http://NAS的IP:8080    （上传证书后自动跳转 https://NAS的IP:8443）
+docker pull ghcr.io/nas200-timmy/linux-3fui-wedui:latest
+# 或者直接用本仓库的 compose（image 已指向上面这个地址）：
+cp .env.example .env      # 填 DATA_DIR（数据目录）与 MEDIA_HOST_DIR（宿主媒体库）
+docker compose pull && docker compose up -d
 ```
 
-`deploy.sh` 部署前自动检查并尽量修复：GPU 清点、NVIDIA runtime、`group_add` 与宿主
-video/render 组一致性（不符时自动改写 compose）、媒体目录属主、端口占用；部署后自动跑
-编码器探针矩阵（`tools/check-hw.sh`），任何一层不通会给出具体修复命令。
-裸用 `docker compose up -d --build` 亦可，但没有上述检查。
+打开 `http://NAS的IP:8080`（在「设置」上传证书后自动跳转 `https://NAS的IP:8443`）。
+镜像同时提供 amd64 与 arm64。
 
-首次使用：
+### ② 本地构建部署（改过代码 / 想完全离线）
+
+```bash
+cp .env.example .env      # 填 DATA_DIR 与 MEDIA_HOST_DIR
+./tools/deploy.sh --build
+```
+
+`deploy.sh` 部署前自动检查并尽量修复：镜像是否存在（没有会先尝试拉预构建镜像）、GPU 清点、
+NVIDIA runtime、`group_add` 与宿主 video/render 组是否匹配（不匹配就写一份
+`docker-compose.override.yml`——不动受版本控制的 compose，避免部署机工作区 dirty）、
+媒体目录属主、端口占用；部署后自动跑编码器探针矩阵（`tools/check-hw.sh`），
+任何一层不通都会给出具体修复命令。裸用 `docker compose up -d --build` 亦可。
+
+### ③ deb / rpm（裸机，装到 /opt/linux-3fui，systemd 托管）
+
+```bash
+sudo apt install ./linux-3fui_<版本>_amd64.deb        # Debian/Ubuntu（arm64 同理）
+sudo dnf install ./linux-3fui-<版本>-1.x86_64.rpm     # Fedora/RHEL
+sudo vi /etc/linux-3fui/env      # 改 MEDIA_ROOT=你的媒体库
+sudo systemctl restart linux-3fui
+```
+
+装完是一个 systemd 服务：`systemctl status linux-3fui` / `journalctl -u linux-3fui -f`；
+数据在 `/var/lib/linux-3fui`（卸载不删），配置在 `/etc/linux-3fui/env`（`config`，升级保留你的改动）；
+排障可前台跑 `linux-3fui`（读同一份配置）。
+
+**裸机部署的前提（包里不捆绑，需要宿主提供）**：
+
+| 依赖 | 说明 |
+|---|---|
+| `ffmpeg` / `ffprobe` | 必装。debian 包会作为依赖自动装；Fedora 的 ffmpeg 在 RPM Fusion，需自行启用（缺了装完会打印提示） |
+| `libicu` | self-contained .NET 的运行时依赖，Debian/Ubuntu 任意版本（76/74/72/70）均可，包已声明依赖 |
+| `fonts-noto-cjk` | 建议装：烧录中文字幕要用（不装则字幕缺字） |
+| VA-API / QSV 驱动 | 要做硬编才需要：宿主 `/dev/dri` + 对应用户态驱动；服务用户已自动加入 `video`/`render` 组 |
+| 端口 | 8080 HTTP、8443 HTTPS、10591/UDP（与 Windows 版 3FUI 的远程调用协议一致） |
+
+### ④ 免安装（tar.gz 目录版 / 单文件）
+
+```bash
+# 目录版（推荐：无自解压依赖，适合各种精简 NAS 系统）
+tar -xzf linux-3fui-<版本>-linux-x64.tar.gz -C /opt/linux-3fui
+cd /opt/linux-3fui && MEDIA_ROOT=/你的媒体库 ./3fui-server
+
+# 单文件版（就丢一个文件跑；首次启动会把原生库自解压到 /tmp，
+# 若 /tmp 挂载是 noexec，请改用目录版或设 DOTNET_BUNDLE_EXTRACT_BASE_DIR 到可执行目录）
+chmod +x 3fui-server-linux-x64
+MEDIA_ROOT=/你的媒体库 ./3fui-server-linux-x64
+```
+
+同样需要宿主自带 `ffmpeg`/`ffprobe` 与 `libicu`。注意静态前端按进程工作目录解析，
+**请在解包目录里启动**（从别的目录启动会拿不到 `wwwroot`，页面只剩"前端未构建"提示）。
+
+**装完都一样：**
 1. 「设置」→ 上传证书（cert.pem + key.pem）启用 HTTPS
-2. 「准备文件」浏览 `/media` 选择待转码文件
+2. 「准备文件」浏览 `/media`（或你配的 MEDIA_ROOT）选择待转码文件
 3. 「参数面板」→「预设管理」→ 导入 Windows 版导出的 `.3fui` 预设（可选）
 4. 「参数面板」→「添加到队列」→「编码队列」监控进度
-
-### 二进制（本地 Linux 直接运行）
-
-```bash
-# 自包含单文件（无需安装 .NET），需系统有 ffmpeg
-curl -LO https://github.com/<你的仓库>/releases/latest/download/3fui-server-linux-x64
-chmod +x 3fui-server-linux-x64
-DATA_DIR=./data HTTP_PORT=8080 HTTPS_PORT=8443 MEDIA_ROOT=/media ./3fui-server-linux-x64
-```
 
 ### 开发构建
 

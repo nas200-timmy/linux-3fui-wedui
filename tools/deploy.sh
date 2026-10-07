@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # linux-3fui 部署闸：宿主环境检查 → 拉起容器 → 容器内硬件/API 验证。
-# 解决三类跨机器部署翻车：
+# 解决四类跨机器部署翻车：
 #   1. 镜像/编码器缺失（构建后 ffmpeg 缺硬编）——部署后探针矩阵兜底
-#   2. 硬件未挂载（无 /dev/dri、缺 NVIDIA runtime）——部署前清点
-#   3. 用户组错位（compose group_add 与宿主 video/render GID 不一致）——自动比对并改写
+#   2. 镜像来源（没有本地镜像时先拉 CI 发布的预构建镜像，拉不到才要求 --build）
+#   3. 硬件未挂载（无 /dev/dri、缺 NVIDIA runtime）——部署前清点
+#   4. 用户组错位（group_add 与宿主 video/render GID 不一致）——写 docker-compose.override.yml 适配
+#      （不动受版本控制的 compose：GID 是每台机器不同的本地配置，改 tracked 文件会让
+#       部署机工作区永久 dirty、之后 git pull 必冲突）
 # 用法：
 #   ./tools/deploy.sh              # 检查 + up -d + 验证
-#   ./tools/deploy.sh --build      # 先构建再部署（首次/改代码后）
-#   ./tools/deploy.sh --yes        # 自动修正 compose 时不询问
+#   ./tools/deploy.sh --build      # 先本地构建再部署（首次/改代码后）
+#   ./tools/deploy.sh --yes        # 自动写入 override 适配时不询问
 # 退出码：0 全部通过；1 存在硬失败（看汇总）。
 set -u
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 BUILD=0; ASSUME_YES=0
 for arg in "$@"; do
@@ -46,11 +49,25 @@ if ! docker info >/dev/null 2>&1; then
 fi
 pass "docker 守护进程正常"
 
+# 镜像来源：优先本地已有；没有就先拉预构建镜像（CI 发布到 ghcr.io），拉不到才要求本地构建
 if [ "$BUILD" = 0 ]; then
-    if ! docker image inspect linux-3fui-2:latest >/dev/null 2>&1; then
-        note_fail "本地镜像 linux-3fui-2:latest 不存在——首次部署请加 --build：./tools/deploy.sh --build"
+    image="$(compose_json | python3 -c "
+import json,sys
+try:
+    print(json.load(sys.stdin)['services']['linux-3fui-2'].get('image',''))
+except Exception:
+    print('')
+" 2>/dev/null)"
+    [ -n "$image" ] || image="linux-3fui-2:latest"
+    if docker image inspect "$image" >/dev/null 2>&1; then
+        pass "镜像 $image 已存在"
     else
-        pass "镜像 linux-3fui-2:latest 存在"
+        say "本地没有镜像 $image，尝试拉取预构建镜像……"
+        if docker compose pull --quiet >/dev/null 2>&1 || docker pull "$image" >/dev/null 2>&1; then
+            pass "已拉取 $image"
+        else
+            note_fail "既无本地镜像也拉不到 $image——要本地构建请加 --build：./tools/deploy.sh --build"
+        fi
     fi
 fi
 
@@ -104,44 +121,66 @@ else
     fi
 fi
 
-# 组比对与自动修正
+# 组比对与自动修正（渲染后的有效配置 = 受版本控制的 compose + 本机 override）
 if [ -n "$RENDER_GID" ] && [ -d /dev/dri ] && command -v python3 >/dev/null; then
-    cur_groups="$(compose_json | python3 -c "
+    # 去重后的有效 group_add：compose 的列表合并语义（替换/追加）不确定，这里按集合判断
+    effective_groups() {
+        compose_json | python3 -c "
 import json,sys
 try:
-    cfg=json.load(sys.stdin)
-    svc=cfg['services'].get('linux-3fui-2',{})
-    print(' '.join(svc.get('group_add') or []))
+    g=[str(x) for x in (json.load(sys.stdin)['services']['linux-3fui-2'].get('group_add') or [])]
 except Exception:
-    print('')
-" 2>/dev/null)"
+    g=[]
+seen=set(); out=[]
+for x in g:
+    if x not in seen:
+        seen.add(x); out.append(x)
+print(' '.join(out))
+" 2>/dev/null
+    }
+    cur_groups="$(effective_groups)"
     if [ -z "$cur_groups" ]; then
         warn "compose 未配置 group_add——容器内可能无权访问 /dev/dri 设备节点"
     else
-        want_groups="${VIDEO_GID:-44} ${RENDER_GID}"
-        if [ "$cur_groups" = "$want_groups" ]; then
-            pass "compose group_add=[$cur_groups] 与宿主一致"
+        missing=""
+        for g in "${VIDEO_GID:-44}" "$RENDER_GID"; do
+            case " $cur_groups " in *" $g "*) ;; *) missing="$missing $g" ;; esac
+        done
+        if [ -z "$missing" ]; then
+            pass "compose group_add=[$cur_groups] 已覆盖宿主 video=${VIDEO_GID:-44} render=${RENDER_GID}"
         else
-            warn "compose group_add=[$cur_groups] 与宿主不符（应为 [$want_groups]）"
-            do_fix=1
-            if [ "$ASSUME_YES" != 1 ]; then
-                printf '  是否自动改写 docker-compose.yml 的 group_add？[y/N] '
+            warn "compose group_add=[$cur_groups] 缺少宿主组：$missing"
+            do_fix=0
+            if [ "$ASSUME_YES" = 1 ]; then
+                do_fix=1
+            else
+                printf '  是否写入 docker-compose.override.yml 做本机适配？[y/N] '
                 read -r ans
                 case "$ans" in y|Y|yes|YES) do_fix=1 ;; *) do_fix=0 ;; esac
             fi
             if [ "$do_fix" = 1 ]; then
-                sed -i -E \
-                    -e "s|^([[:space:]]*- \")[0-9]+(\"[[:space:]]*# 宿主 video 组.*)$|\1${VIDEO_GID:-44}\2|" \
-                    -e "s|^([[:space:]]*- \")[0-9]+(\"[[:space:]]*# 宿主 render 组.*)$|\1${RENDER_GID}\2|" \
-                    docker-compose.yml
-                new_groups="$(compose_json | python3 -c "import json,sys;print(' '.join(json.load(sys.stdin)['services']['linux-3fui-2'].get('group_add') or []))" 2>/dev/null)"
-                if [ "$new_groups" = "$want_groups" ]; then
-                    pass "已自动改写 group_add=[$new_groups]"
+                # 写 override 而不是 sed 改 docker-compose.yml：GID 是每台机器不同的本地配置，
+                # 改受版本控制的文件会让部署机工作区永久 dirty、之后 git pull 必冲突。
+                cat > docker-compose.override.yml <<EOF
+# 由 tools/deploy.sh 生成：本机 video/render 组 GID 适配（每台机器不同，已被 .gitignore 忽略）
+services:
+  linux-3fui-2:
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID}"
+EOF
+                new_groups="$(effective_groups)"
+                still_missing=""
+                for g in "${VIDEO_GID:-44}" "$RENDER_GID"; do
+                    case " $new_groups " in *" $g "*) ;; *) still_missing="$still_missing $g" ;; esac
+                done
+                if [ -z "$still_missing" ]; then
+                    pass "已写入 docker-compose.override.yml，有效 group_add=[$new_groups]"
                 else
-                    note_fail "自动改写失败（compose 结构可能已变化），请手动把 group_add 改为 [$want_groups]"
+                    note_fail "写入 override 后仍缺组:$still_missing（compose 结构可能已变化），请人工检查 docker-compose.override.yml"
                 fi
             else
-                note_fail "group_add 未修正，容器硬件访问会失败（稍后可重跑 ./tools/deploy.sh --yes）"
+                note_fail "group_add 未适配，容器硬件访问会失败（稍后可重跑 ./tools/deploy.sh --yes）"
             fi
         fi
     fi

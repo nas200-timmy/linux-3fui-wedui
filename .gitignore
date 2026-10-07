@@ -33,6 +33,13 @@ Thumbs.db
 .env.*
 !.env.example
 
+# 本机硬件适配由 tools/deploy.sh 写入（每台机器不同，不入库，否则 pull 必冲突）
+docker-compose.override.yml
+
+# 发布流水线中间产物
+publish/
+publish-single/
+
 # 本地构建/运行残留
 *.tsbuildinfo
 *.log

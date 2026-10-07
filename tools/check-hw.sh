@@ -10,7 +10,7 @@
 #   硬失败 = 镜像缺库（容器问题，构建坏了）/ VAAPI / NVENC / API / 健康检查
 #   警告   = QSV 端到端失败但 VAAPI 可用（多为宿主 oneVPL 栈问题，同引擎可被 VAAPI 替代）
 set -u
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 IMAGE="${IMAGE:-linux-3fui-2:latest}"
 DRI_NODE="${DRI_NODE:-/dev/dri/renderD128}"

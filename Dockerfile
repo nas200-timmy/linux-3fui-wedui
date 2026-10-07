@@ -5,7 +5,9 @@
 # 支持 linux/amd64 与 linux/arm64（多架构 NAS 通用）。
 
 # ── 阶段 1：前端构建 ──
-FROM node:22-alpine AS webbuild
+# ★ --platform=$BUILDPLATFORM：多架构构建时让 node/.NET 阶段跑在宿主架构上（交叉发布 -r linux-arm64），
+#   否则 arm64 构建要在 QEMU 里跑 npm ci + dotnet publish，慢十几倍。
+FROM --platform=$BUILDPLATFORM node:22-alpine AS webbuild
 WORKDIR /web
 COPY src/3fui-web/package.json src/3fui-web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -14,13 +16,14 @@ COPY src/3fui-web/ ./
 RUN npm run build
 
 # ── 阶段 2：服务端发布 ──
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG TARGETARCH=amd64
+ARG VERSION=0.0.0-dev
 WORKDIR /src
 COPY src/3fui-core/ 3fui-core/
 COPY src/3fui-server/ 3fui-server/
 COPY --from=webbuild /3fui-server/wwwroot 3fui-server/wwwroot
-RUN dotnet publish 3fui-server/3fui-server.csproj -c Release -r linux-${TARGETARCH} --self-contained true -o /out --nologo
+RUN dotnet publish 3fui-server/3fui-server.csproj -c Release -r linux-${TARGETARCH} --self-contained true -p:Version=${VERSION} -o /out --nologo
 
 # ── 阶段 3：运行时 ──
 FROM debian:trixie-slim AS runtime

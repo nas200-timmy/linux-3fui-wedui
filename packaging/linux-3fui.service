@@ -1,0 +1,30 @@
+[Unit]
+Description=linux-3fui —— FFmpegFreeUI 的 Linux 网页版批量转码服务
+Documentation=https://github.com/nas200-timmy/linux-3fui-wedui
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=linux-3fui
+Group=linux-3fui
+# 配置全部在 /etc/linux-3fui/env（MEDIA_ROOT / DATA_DIR / 端口 / TZ）
+EnvironmentFile=-/etc/linux-3fui/env
+# ★ 必须固定工作目录：前端静态资源按 ContentRoot（默认=进程工作目录）解析，
+#   从别的目录启动会找不到 wwwroot，页面只剩"前端未构建"提示。
+WorkingDirectory=/opt/linux-3fui
+ExecStart=/opt/linux-3fui/3fui-server
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+# 队列里可能同时跑多个 ffmpeg，文件句柄给宽一点
+LimitNOFILE=65536
+# 硬编需要 /dev/dri：服务用户已由安装脚本加入 video/render 组
+# （改了组或换了显卡后：sudo systemctl restart linux-3fui）
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

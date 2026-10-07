@@ -1,0 +1,114 @@
+# nfpm 打包配置：同时产出 .deb 与 .rpm（CI 里每个架构各跑一次）
+#
+# 用法（本地试打）：把 dotnet publish 的输出放在 <仓库>/publish，然后
+#   VERSION=0.1.0 ARCH=amd64 nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+#   VERSION=0.1.0 ARCH=amd64 nfpm package -f packaging/nfpm.yaml -p rpm -t dist/
+#   （ARCH 用 amd64/arm64，nfpm 会自动映射成 rpm 的 x86_64/aarch64）
+#
+# 注意：本版 nfpm 只对 version/arch 做 ${} 环境变量展开，`contents.src` 不展开，
+# 因此 publish 目录固定为仓库内的 `publish/`（已在 .gitignore / .dockerignore 里）。
+#
+# 设计要点：
+#   - 装到 /opt/linux-3fui（**目录发布**，不用单文件——单文件首次启动要把原生库自解压到
+#     /tmp，而不少 NAS 的 /tmp 是 noexec，裸机部署会直接起不来）
+#   - ffmpeg/ffprobe 由宿主提供（裸机部署的前提）；硬编驱动列为 Recommends，缺了只是没有硬编
+#   - 数据目录 /var/lib/linux-3fui（用户数据，卸载不删）；配置 /etc/linux-3fui/env（config，升级保留改动）
+
+name: linux-3fui
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+release: "1"
+section: video
+priority: optional
+maintainer: nas200-timmy <nas200-timmy@users.noreply.github.com>
+vendor: linux-3fui contributors
+homepage: https://github.com/nas200-timmy/linux-3fui-wedui
+license: MIT
+description: |
+  FFmpegFreeUI(3FUI) 的 Linux 网页版：批量转码服务端 + Vue 前端（与 Windows 版预设双向兼容）。
+  安装位置 /opt/linux-3fui，由 systemd 单元 linux-3fui.service 托管；
+  数据目录 /var/lib/linux-3fui，配置 /etc/linux-3fui/env（MEDIA_ROOT 指向你的媒体库）。
+  需要宿主自带 ffmpeg/ffprobe；硬件加速另需 /dev/dri 与 VA-API/QSV 用户态驱动（见 README「裸机部署」）。
+
+contents:
+  # ① 发布目录（含前端 wwwroot）→ /opt/linux-3fui
+  #    不写 file_info：沿用 dotnet publish 出来的真实权限
+  #    （3fui-server 是 0755 可执行，dll/wwwroot 是 0644；统一写 0755 会把数据文件也变可执行）
+  - src: publish
+    dst: /opt/linux-3fui
+    type: tree
+  # ② systemd 单元
+  - src: packaging/linux-3fui.service
+    dst: /etc/systemd/system/linux-3fui.service
+    file_info:
+      mode: 0644
+  # ③ 运行配置（config：升级时保留用户改动）
+  - src: packaging/env.default
+    dst: /etc/linux-3fui/env
+    type: config
+    file_info:
+      mode: 0644
+  # ④ 前台调试入口
+  - src: packaging/bin/linux-3fui
+    dst: /usr/bin/linux-3fui
+    file_info:
+      mode: 0755
+  # ⑤ 数据目录（属主由 preinstall 建的用户承担）
+  - dst: /var/lib/linux-3fui
+    type: dir
+    file_info:
+      mode: 0750
+      owner: linux-3fui
+      group: linux-3fui
+
+scripts:
+  preinstall: packaging/scripts/preinstall.sh
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+
+# deb 专有：额外控制字段（Bugs 之类）
+deb:
+  fields:
+    Bugs: https://github.com/nas200-timmy/linux-3fui-wedui/issues
+
+# 依赖按包管理器分开写（Overridables 只认 depends/recommends/suggests/conflicts/replaces/provides）
+overrides:
+  deb:
+    # ffmpeg 在 Debian/Ubuntu 主源里 → 硬依赖；ICU/OpenSSL/zlib 是 self-contained .NET 的运行时依赖
+    depends:
+      - ffmpeg
+      - libicu76 | libicu74 | libicu72 | libicu70
+      - libssl3t64 | libssl3
+      - zlib1g
+      - ca-certificates
+      - tzdata
+      - libstdc++6
+      - libgcc-s1
+    recommends:
+      - fonts-noto-cjk
+      - libva2
+      - libva-drm2
+      - intel-media-va-driver
+      - libmfx-gen1.2
+      - libvpl2
+      - mesa-va-drivers
+      - libvulkan1
+      - mesa-vulkan-drivers
+  rpm:
+    # ★ ffmpeg 只能放 Recommends：Fedora 的 ffmpeg 在 RPM Fusion，
+    #   写进 Depends 会让 `dnf install ./linux-3fui.rpm` 直接失败。缺了由 postinstall 大声提示。
+    depends:
+      - glibc
+      - libstdc++
+      - openssl-libs
+      - zlib
+      - ca-certificates
+      - tzdata
+    recommends:
+      - ffmpeg
+      - libicu
+      - google-noto-sans-cjk-fonts
+      - libva
+      - mesa-va-drivers
+      - libvpl

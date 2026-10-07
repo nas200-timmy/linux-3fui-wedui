@@ -4,7 +4,9 @@
 
 services:
   linux-3fui-2:
-    image: linux-3fui-2:latest   # 本地构建的镜像
+    # 默认用 CI 发布的预构建镜像（多架构 amd64/arm64）；本地 `docker compose build` 也会打成同一个 tag。
+    # 想固定版本就把 latest 换成具体版本号，例如 :0.1.0
+    image: ghcr.io/nas200-timmy/linux-3fui-wedui:latest
     build:
       context: .
     container_name: linux-3fui-2
