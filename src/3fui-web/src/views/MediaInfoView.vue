@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api, copyToClipboard } from '../api'
+import { api, copyToClipboard, errorText } from '../api'
 import { useToast } from '../store'
 
 interface Entry { name: string; path: string; isDirectory: boolean; isMedia: boolean; size?: number }
@@ -101,7 +101,7 @@ function browse(path?: string) {
       parent.value = data.parent
       entries.value = data.entries
     })
-    .catch(error => toast.push('err', String(error)))
+    .catch(error => toast.push('err', errorText(error)))
 }
 
 function probe(path: string) {
@@ -112,10 +112,10 @@ function probe(path: string) {
   showRaw.value = false
   api.probe.info(path)
     .then(info => {
-      if (info && typeof info === 'object' && 'error' in info) probeError.value = String((info as { error: unknown }).error)
+      if (info && typeof info === 'object' && 'error' in info) probeError.value = errorText((info as { error: unknown }).error)
       else probeInfo.value = info
     })
-    .catch(error => { probeError.value = String(error) })
+    .catch(error => { probeError.value = errorText(error) })
     .finally(() => { loading.value = false })
 }
 

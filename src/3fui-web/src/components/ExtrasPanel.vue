@@ -6,6 +6,7 @@ import { storeToRefs } from 'pinia'
 import ModernComboBox from './ModernComboBox.vue'
 import DirPickerDialog from './DirPickerDialog.vue'
 import ParamDialog from './ParamDialog.vue'
+import { errorText } from '../api'
 import { ATTACH_TYPE, CHAPTER_SOURCE, META_PRESETS } from '../schema'
 import { useCurrentPreset, useToast } from '../store'
 
@@ -92,7 +93,7 @@ async function importMeta(event: Event) {
     metaList.value = [...metaList.value, ...items]
     toast.push('ok', `已导入 ${items.length} 行元数据`)
   } catch (error) {
-    toast.push('err', `导入失败：${String(error instanceof Error ? error.message : error)}`)
+    toast.push('err', `导入失败：${errorText(error)}`)
   }
 }
 
@@ -167,7 +168,7 @@ async function importAttach(event: Event) {
     attachList.value = [...attachList.value, ...items]
     toast.push('ok', `已导入 ${items.length} 行附件`)
   } catch (error) {
-    toast.push('err', `导入失败：${String(error instanceof Error ? error.message : error)}`)
+    toast.push('err', `导入失败：${errorText(error)}`)
   }
 }
 </script>

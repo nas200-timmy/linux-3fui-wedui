@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { api, copyToClipboard, openQueueWebSocket, type QueueTask } from '../api'
+import { api, copyToClipboard, errorText, openQueueWebSocket, type QueueTask } from '../api'
 import { usePendingFiles, useToast } from '../store'
 
 const toast = useToast()
@@ -94,7 +94,7 @@ function selectAll() {
 
 function act(action: string, ids: string[] = [...selected.value]) {
   if (ids.length === 0) return toast.push('err', '请先勾选任务')
-  api.queue.action(action, ids).then(() => refresh()).catch(error => toast.push('err', String(error)))
+  api.queue.action(action, ids).then(() => refresh()).catch(error => toast.push('err', errorText(error)))
 }
 
 function openLog(id: string) {
@@ -159,7 +159,7 @@ function menuMove(delta: number) {
   if (index < 0 || next < 0 || next >= tasks.value.length) return
   const ids = tasks.value.map(t => t.ID)
   ;[ids[index], ids[next]] = [ids[next], ids[index]]
-  api.queue.reorder(ids).then(() => { refresh(); menuOpen.value = false }).catch(error => toast.push('err', String(error)))
+  api.queue.reorder(ids).then(() => { refresh(); menuOpen.value = false }).catch(error => toast.push('err', errorText(error)))
 }
 
 // 原版「定位」仅单选生效（Form_v6_编码队列：ids.Count <> 1 Then Exit Sub）
@@ -196,7 +196,7 @@ function addCommandLine() {
   if (!commandLineTask.value.trim()) return toast.push('err', '请输入命令行')
   api.queue.addCommandLine(commandLineTask.value.trim(), `命令行任务 ${new Date().toLocaleTimeString()}`)
     .then(() => { commandLineTask.value = ''; toast.push('ok', '命令行任务已添加') })
-    .catch(error => toast.push('err', String(error)))
+    .catch(error => toast.push('err', errorText(error)))
 }
 
 function onDrop(event: DragEvent) {

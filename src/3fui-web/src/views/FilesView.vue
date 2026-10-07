@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api } from '../api'
+import { api, errorText } from '../api'
 import { useCurrentPreset, usePendingFiles, useToast, 入队兼容确认 } from '../store'
 import { 默认音频编码器 } from '../schema'
 import ModernComboBox from '../components/ModernComboBox.vue'
@@ -35,7 +35,7 @@ function browse(path?: string) {
       parent.value = data.parent
       entries.value = data.entries
     })
-    .catch(error => toast.push('err', String(error)))
+    .catch(error => toast.push('err', errorText(error)))
 }
 
 function remember(entry: Entry) {
@@ -71,7 +71,7 @@ function addDirectoryRecursive(path: string) {
     files.forEach(remember)
     pendingFiles.add(files.map(entry => entry.path))
     toast.push('ok', `已递归加入 ${files.length} 个文件`)
-  }).catch(error => toast.push('err', String(error)))
+  }).catch(error => toast.push('err', errorText(error)))
 }
 
 // ── 待处理列表 ──
@@ -156,7 +156,7 @@ async function enqueueAll() {
       selected.value = new Set()
       emit('go-queue')
     })
-    .catch(error => toast.push('err', String(error)))
+    .catch(error => toast.push('err', errorText(error)))
     .finally(() => { enqueueBusy.value = false })
 }
 

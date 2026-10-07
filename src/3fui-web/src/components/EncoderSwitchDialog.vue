@@ -3,6 +3,7 @@
 // 外壳复用 ParamDialog；App.vue 在有待确认消息时挂载本组件，消息数据来自 useEncoderSwitch 队列。
 import { computed, ref } from 'vue'
 import ParamDialog from './ParamDialog.vue'
+import { errorText } from '../api'
 import { useEncoderSwitch, useToast } from '../store'
 
 const store = useEncoderSwitch()
@@ -19,7 +20,7 @@ async function choose(选择: 'preset' | 'once') {
     toast.push('ok', 选择 === 'preset' ? '预设已永久切换' : '已按仅本次任务处理')
   } catch (error) {
     // API 失败（如 400）时消息留在队列里，弹窗不关，错误内容交给用户
-    toast.push('err', String(error))
+    toast.push('err', errorText(error))
   } finally {
     busy.value = false
   }

@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using FFmpegFreeUI;
 
 namespace linux3fui.Server;
@@ -54,8 +55,9 @@ public sealed class AgentTools
         JsonObject Parameters);
 
     /// <summary>
-    /// 17 个工具：0 档 3 个（参数面板，全在浏览器）、1 档 14 个（服务端 10 + 浏览器 4）。
+    /// 22 个工具：0 档 5 个（参数面板 3 + 技能资料 2）、1 档 17 个（服务端 13 + 浏览器 4）。
     /// 工具名与上游 Agent本地工具_v6.vb 保持一致，便于模型把上游知识迁移过来。
+    /// `fetch_url` 另受「Agent联网设置」控制（禁用联网时不下发）。
     /// </summary>
     private static readonly ToolDef[] Definitions =
     [
@@ -80,6 +82,17 @@ public sealed class AgentTools
                 ("changes", Obj("要修改的字段：{预设数据_v6 属性名: 新值}，例如 {\"输出容器\":\"mkv\",\"视频参数_质量控制_值\":\"23\"}"), false),
                 ("preset_json", Str("整包替换用的完整预设 JSON 字符串；与 changes 二选一，同时给时以 preset_json 为先"), false),
                 ("note", Str("本次修改的说明（会记录在返回值里）"), false))),
+
+        // ── 0 档：技能资料库（与上游 list_agent_skills / read_agent_skill_reference 对齐）──
+        new("list_agent_skills",
+            "列出内置技能资料库的索引。不确定 ffmpeg 用法、参数含义或本项目行为时先调它，再用 read_agent_skill_reference 读具体那一篇。",
+            LevelSafe, "server", false, Props()),
+
+        new("read_agent_skill_reference",
+            "读技能资料库里的某一篇 markdown。name 用 list_agent_skills 返回的名字（带不带 references/ 前缀与 .md 后缀都行）。",
+            LevelSafe, "server", false, Props(
+                ("name", Str("文档名，例如 parameter-panel / command-generation / filters-and-streams / queue-and-tasks / hardware-encoders"), true),
+                ("skill", Str("技能名，默认 ffmpegfreeui（目前只有这一个）"), false))),
 
         // ── 1 档：环境控制 —— 服务端执行 ──
         new("get_queue_summary",
@@ -141,6 +154,29 @@ public sealed class AgentTools
             LevelEnvironment, "server", false, Props(
                 ("path", Str("目录路径，省略则从媒体根目录开始"), false))),
 
+        new("read_media_text_file",
+            "读取媒体库里的文本文件（字幕 SRT/ASS、.ffmetadata、编码日志等）。只读，且限定在媒体根目录内。",
+            LevelEnvironment, "server", false, Props(
+                ("path", Str("文件路径（必须在媒体根目录内）"), true),
+                ("start_line", Int("从第几行开始（1 起），默认 1", 1, 1000000), false),
+                ("line_count", Int("最多读多少行，默认 200，最大 2000", 1, 2000), false),
+                ("max_chars", Int("单行最多保留多少字符，默认 400，最大 4000", 1, 4000), false))),
+
+        new("list_media_files",
+            "列出媒体库里的文件，可按扩展名过滤、可递归（限定在媒体根目录内）。比 browse_media_directory 更适合找某个电影/剧集的视频文件。",
+            LevelEnvironment, "server", false, Props(
+                ("path", Str("目录路径，省略则从媒体根目录开始"), false),
+                ("recursive", Bool("是否递归子目录，默认 false", true), false),
+                ("extensions", StrArr("只看这些扩展名（不带点），例如 [\"mkv\",\"mp4\"]；省略＝全部"), false),
+                ("limit", Int("最多返回多少条，默认 100，最大 500", 1, 500), false))),
+
+        new("fetch_url",
+            "抓取一个**公网** URL 的文本内容（只支持 GET，20 秒超时，内网/本机地址会被拒绝）。用于查资料或看接口返回。受「联网设置」控制：设为「禁用联网」时这个工具不会出现。",
+            LevelEnvironment, "server", false, Props(
+                ("url", Str("完整 http(s) 地址"), true),
+                ("format", Str("text（默认，HTML 会尽量褪成纯文本）/ json（按 JSON 解析）"), false),
+                ("max_chars", Int("最多返回多少字符，默认 4000，最大 20000", 1, 20000), false))),
+
         // ── 1 档：环境控制 —— 浏览器执行 ──
         new("get_prepare_files", "读取「准备文件」页当前待处理的文件路径列表。",
             LevelEnvironment, "browser", false, Props()),
@@ -161,11 +197,18 @@ public sealed class AgentTools
                 ("name", Str("预设名（不含 .json 后缀）"), true))),
     ];
 
+    /// <summary>
+    /// 工具是否可用：除权限级别外还有附加条件——
+    /// `fetch_url` 受「Agent联网设置」控制（2＝禁用联网时不下发，也不允许执行）。
+    /// </summary>
+    private static bool IsAvailable(ToolDef tool) =>
+        tool.Name != "fetch_url" || 设置_v6.实例对象.Agent联网设置 != 2;
+
     /// <summary>按权限级别过滤后的目录（给前端渲染与组装 tools 用）。</summary>
     public JsonArray Catalog(int permissionLevel)
     {
         var result = new JsonArray();
-        foreach (var tool in Definitions.Where(tool => tool.Level <= permissionLevel))
+        foreach (var tool in Definitions.Where(tool => tool.Level <= permissionLevel && IsAvailable(tool)))
         {
             result.Add(new JsonObject
             {
@@ -181,11 +224,11 @@ public sealed class AgentTools
         return result;
     }
 
-    /// <summary>取某工具在当前级别的定义；不在目录里（含未知工具、超出级别）返回 null。</summary>
+    /// <summary>取某工具在当前级别的定义；不在目录里（含未知工具、超出级别、联网被禁）返回 null。</summary>
     public JsonObject? Definition(string name, int permissionLevel)
     {
         var tool = Definitions.FirstOrDefault(item => item.Name == name);
-        return tool is null || tool.Level > permissionLevel ? null : ToJson(tool);
+        return tool is null || tool.Level > permissionLevel || !IsAvailable(tool) ? null : ToJson(tool);
     }
 
     private static JsonObject ToJson(ToolDef tool) => new()
@@ -205,17 +248,22 @@ public sealed class AgentTools
     public sealed record ExecutionResult(bool Ok, string Result, int StatusCode = 200);
 
     /// <summary>执行一个 server 范围工具；权限不足返回 403，工具内部错误返回 {ok:false} 的可读文本（不打断循环）。</summary>
-    public ExecutionResult Execute(string name, JsonElement args, int permissionLevel)
+    public async Task<ExecutionResult> ExecuteAsync(string name, JsonElement args, int permissionLevel)
     {
         var tool = Definitions.FirstOrDefault(item => item.Name == name);
         if (tool is null) return new ExecutionResult(false, $"未知工具：{name}", 404);
         if (tool.Level > permissionLevel)
             return new ExecutionResult(false, $"权限不足：{name} 需要「{LevelName(tool.Level)}」级别，当前是「{LevelName(permissionLevel)}」", 403);
+        if (!IsAvailable(tool))
+            return new ExecutionResult(false, $"「{name}」当前不可用：联网设置是「禁用联网」，请用户先在底部把联网设置改掉", 403);
         if (tool.Scope != "server")
             return new ExecutionResult(false, $"{name} 需要浏览器端执行（它操作的是你界面上的状态），服务端无法代劳", 400);
 
         try
         {
+            if (name == "fetch_url")
+                return new ExecutionResult(true, Limit(await FetchUrlAsync(args), ResultLimit));
+
             var text = name switch
             {
                 "get_queue_summary" => GetQueueSummary(args),
@@ -228,6 +276,10 @@ public sealed class AgentTools
                 "get_system_hardware" => GetSystemHardware(),
                 "probe_media_file" => ProbeMediaFile(args),
                 "browse_media_directory" => BrowseMediaDirectory(args),
+                "read_media_text_file" => ReadMediaTextFile(args),
+                "list_media_files" => ListMediaFiles(args),
+                "list_agent_skills" => AgentSkills.ListJson(),
+                "read_agent_skill_reference" => ReadSkillReference(args),
                 _ => throw new InvalidOperationException($"工具 {name} 未实现"),
             };
             return new ExecutionResult(true, Limit(text, ResultLimit));
@@ -660,6 +712,259 @@ public sealed class AgentTools
             while (entries.Count > 200) entries.RemoveAt(entries.Count - 1);
         }
         return json.ToJsonString(JsonOptions.Compact);
+    }
+
+    /// <summary>读媒体库内的文本文件（字幕 / .ffmetadata / 日志）。限定媒体根目录内，只读。</summary>
+    private string ReadMediaTextFile(JsonElement args)
+    {
+        var raw = ReadString(args, "path");
+        if (string.IsNullOrWhiteSpace(raw)) return Error("path 不能为空");
+        var (full, pathError) = ResolveMediaPath(raw);
+        if (pathError is not null) return Error(pathError);
+        if (!File.Exists(full!)) return Error($"文件不存在：{raw}");
+
+        var startLine = Math.Max(1, Number(args, "start_line") ?? 1);
+        var lineCount = Math.Clamp(Number(args, "line_count") ?? 200, 1, 2000);
+        var maxChars = Math.Clamp(Number(args, "max_chars") ?? 400, 1, 4000);
+
+        var info = new FileInfo(full!);
+        if (info.Length > 8 * 1024 * 1024) return Error($"文件太大（{info.Length / 1024 / 1024}MB），超过 8MB 不读");
+
+        var lines = File.ReadAllLines(full!);
+        var slice = lines.Skip(startLine - 1).Take(lineCount)
+            .Select(line => line.Length > maxChars ? line[..maxChars] + "…" : line)
+            .ToArray();
+        return new JsonObject
+        {
+            ["path"] = raw,
+            ["总行数"] = lines.Length,
+            ["起始行"] = startLine,
+            ["返回行数"] = slice.Length,
+            ["内容"] = string.Join("\n", slice),
+        }.ToJsonString(JsonOptions.Compact);
+    }
+
+    /// <summary>列媒体库内的文件（可递归、可按扩展名过滤）。限定媒体根目录内。</summary>
+    private string ListMediaFiles(JsonElement args)
+    {
+        var (full, pathError) = ResolveMediaPath(ReadString(args, "path") ?? "");
+        if (pathError is not null) return Error(pathError);
+        if (!Directory.Exists(full)) return Error($"目录不存在：{ReadString(args, "path") ?? "(媒体根)"}");
+
+        var recursive = Flag(args, "recursive");
+        var limit = Math.Clamp(Number(args, "limit") ?? 100, 1, 500);
+        var extensions = ReadStringList(args, "extensions")
+            .Select(ext => ext.TrimStart('.').ToLowerInvariant())
+            .Where(ext => ext.Length > 0)
+            .ToHashSet();
+
+        var all = Directory.EnumerateFiles(full!, "*", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
+            .Where(path => extensions.Count == 0 || extensions.Contains(Path.GetExtension(path).TrimStart('.').ToLowerInvariant()))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToList();
+
+        var files = new JsonArray(all.Take(limit).Select(path => (JsonNode)new JsonObject
+        {
+            ["name"] = Path.GetFileName(path),
+            ["path"] = path,
+            ["sizeMb"] = Math.Round(new FileInfo(path).Length / 1024d / 1024d, 1),
+        }).ToArray());
+
+        var payload = new JsonObject
+        {
+            ["目录"] = full,
+            ["递归"] = recursive,
+            ["过滤扩展名"] = extensions.Count > 0 ? new JsonArray(extensions.Select(ext => (JsonNode)JsonValue.Create(ext)).ToArray()) : null,
+            ["命中"] = all.Count,
+            ["返回"] = files.Count,
+            ["文件"] = files,
+        };
+        if (all.Count > files.Count) payload["说明"] = $"还有 {all.Count - files.Count} 个未列出，可加 extensions 过滤或调 limit";
+        return payload.ToJsonString(JsonOptions.Compact);
+    }
+
+    private static string ReadSkillReference(JsonElement args)
+    {
+        var name = ReadString(args, "name");
+        if (string.IsNullOrWhiteSpace(name)) return Error("name 不能为空（可先用 list_agent_skills 看有哪些）");
+        var content = AgentSkills.Read(name)
+            ?? Error($"没有这篇参考文档：{name}。可用：{string.Join("、", AgentSkills.References.Select(reference => reference.Name))}");
+        return content;
+    }
+
+    /// <summary>抓公网 URL（只 GET、20s 超时、拒绝内网/本机地址）。受「Agent联网设置」控制。</summary>
+    private static async Task<string> FetchUrlAsync(JsonElement args)
+    {
+        if (设置_v6.实例对象.Agent联网设置 == 2) return Error("联网设置是「禁用联网」，抓网页的工具不可用");
+        var url = (ReadString(args, "url") ?? "").Trim();
+        if (url.Length == 0) return Error("url 不能为空");
+        if (!IsPublicHttpUrl(url, out var reason)) return Error(reason);
+
+        var format = (ReadString(args, "format") ?? "text").Trim().ToLowerInvariant();
+        var maxChars = Math.Clamp(Number(args, "max_chars") ?? 4000, 1, 20000);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.TryAddWithoutValidation("User-Agent", "linux-3fui-agent/1.0");
+            using var response = await FetchClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, timeout.Token);
+            var body = await response.Content.ReadAsStringAsync(timeout.Token);
+            var contentType = response.Content.Headers.ContentType?.MediaType ?? "";
+            var text = body;
+            if (format != "json" && (contentType.Contains("html", StringComparison.OrdinalIgnoreCase) || body.TrimStart().StartsWith('<')))
+                text = HtmlToText(body);
+            else if (format == "json")
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(body);
+                    text = JsonSerializer.Serialize(document.RootElement, JsonOptions.Compact);
+                }
+                catch (JsonException)
+                {
+                    // 不是 JSON 就原样返回，让模型自己看
+                }
+            }
+            var payload = new JsonObject
+            {
+                ["url"] = url,
+                ["status"] = (int)response.StatusCode,
+                ["contentType"] = contentType,
+                ["原文长度"] = body.Length,
+                ["已截断"] = text.Length > maxChars,
+                ["内容"] = text.Length > maxChars ? text[..maxChars] : text,
+            };
+            return payload.ToJsonString(JsonOptions.Compact);
+        }
+        catch (OperationCanceledException)
+        {
+            return Error("抓取超时（20 秒）");
+        }
+        catch (Exception ex)
+        {
+            return Error("抓取失败：" + ex.Message);
+        }
+    }
+
+    private static readonly HttpClient FetchClient = new() { Timeout = Timeout.InfiniteTimeSpan };
+
+    /// <summary>只允许公网 http(s)：拦掉本机/内网/链路本地地址，避免工具被用来探测内网或应用自身。</summary>
+    private static bool IsPublicHttpUrl(string url, out string reason)
+    {
+        reason = "";
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            reason = "URL 格式不正确（需要完整地址，例如 https://example.com/page）";
+            return false;
+        }
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+        {
+            reason = "只支持 http/https";
+            return false;
+        }
+        var host = uri.Host;
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".local", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".internal", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "不允许访问本机/内网地址";
+            return false;
+        }
+        if (System.Net.IPAddress.TryParse(host, out var literal))
+        {
+            if (IsPrivateAddress(literal))
+            {
+                reason = "不允许访问本机/内网地址";
+                return false;
+            }
+            return true;
+        }
+        try
+        {
+            var resolved = System.Net.Dns.GetHostAddresses(host);
+            if (resolved.Length == 0 || resolved.Any(IsPrivateAddress))
+            {
+                reason = "该域名解析到本机/内网地址，已拒绝";
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            reason = "域名解析失败：" + ex.Message;
+            return false;
+        }
+        return true;
+    }
+
+    private static bool IsPrivateAddress(System.Net.IPAddress ip)
+    {
+        if (System.Net.IPAddress.IsLoopback(ip)) return true;
+        var bytes = ip.GetAddressBytes();
+        if (bytes.Length == 4)
+        {
+            return bytes[0] == 10
+                || bytes[0] == 127
+                || bytes[0] == 0
+                || (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
+                || (bytes[0] == 192 && bytes[1] == 168)
+                || (bytes[0] == 169 && bytes[1] == 254)
+                || (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127);
+        }
+        if (bytes.Length == 16)
+        {
+            if (ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal) return true;
+            if (bytes[0] == 0xfc || bytes[0] == 0xfd) return true; // 唯一本地地址 fc00::/7
+            if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) return true;
+        }
+        return false;
+    }
+
+    /// <summary>把 HTML 粗褪成纯文本（去脚本/样式/标签，保留段落空行）。</summary>
+    private static string HtmlToText(string html)
+    {
+        var text = Regex.Replace(html, @"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ");
+        text = Regex.Replace(text, @"(?is)<!--.*?-->", " ");
+        text = Regex.Replace(text, @"(?i)<br\s*/?>|</p>|</div>|</li>|</tr>", "\n");
+        text = Regex.Replace(text, @"(?s)<[^>]+>", " ");
+        text = System.Net.WebUtility.HtmlDecode(text);
+        text = Regex.Replace(text, @"[ \t\f\v]+", " ");
+        text = Regex.Replace(text, @"\n\s*\n\s*", "\n\n");
+        return text.Trim();
+    }
+
+    /// <summary>把工具入参里的路径解析到媒体根目录内（越界、软链逃逸都拒绝）。</summary>
+    private (string? Full, string? Error) ResolveMediaPath(string? path)
+    {
+        var root = _config.MediaRoot;
+        if (string.IsNullOrWhiteSpace(root)) return (null, "服务端没有配置媒体根目录（MEDIA_ROOT），该工具不可用");
+        var rootFull = Path.GetFullPath(root);
+        var rootPrefix = rootFull.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var raw = (path ?? "").Trim();
+        // 绝对路径按原意解释（模型常直接抄 list_media_files 返回的绝对路径）；
+        // 相对路径才挂到媒体根下——绝不要把 /etc/passwd 这种静默改写成 <root>/etc/passwd。
+        var full = Path.GetFullPath(raw.StartsWith('/') || raw.StartsWith('\\') ? raw : Path.Combine(rootFull, raw));
+
+        if (!full.StartsWith(rootPrefix, StringComparison.Ordinal) && !string.Equals(full, rootFull, StringComparison.Ordinal))
+            return (null, "路径超出媒体根目录");
+
+        // 软链接逃逸：解析最终目标后再判一次
+        try
+        {
+            FileSystemInfo? info = File.Exists(full) ? new FileInfo(full) : Directory.Exists(full) ? new DirectoryInfo(full) : null;
+            var target = info?.ResolveLinkTarget(true);
+            if (target is not null)
+            {
+                var targetFull = Path.GetFullPath(target.FullName);
+                if (!targetFull.StartsWith(rootPrefix, StringComparison.Ordinal) && !string.Equals(targetFull, rootFull, StringComparison.Ordinal))
+                    return (null, "路径经软链接指向了媒体根目录之外");
+            }
+        }
+        catch
+        {
+            // 解析失败就不额外拦截，后面的读写会自己报错
+        }
+        return (full, null);
     }
 
     #endregion

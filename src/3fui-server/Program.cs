@@ -621,7 +621,7 @@ app.MapPost("/api/agent/tools/{name}", async (string name, HttpRequest request, 
     }
     if (args.ValueKind != JsonValueKind.Object) args = JsonDocument.Parse("{}").RootElement.Clone();
 
-    var outcome = await Task.Run(() => agentTools.Execute(name, args, 设置_v6.实例对象.Agent权限级别), cancellationToken);
+    var outcome = await agentTools.ExecuteAsync(name, args, 设置_v6.实例对象.Agent权限级别);
     if (outcome.StatusCode != StatusCodes.Status200OK)
         return BadResult(outcome.StatusCode, outcome.Result);
     return Results.Json(new { ok = outcome.Ok, result = outcome.Result }, JsonOptions.Compact);

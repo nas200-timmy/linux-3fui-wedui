@@ -5,7 +5,7 @@
 import { onMounted, ref } from 'vue'
 import ParamDialog from './ParamDialog.vue'
 import DirPickerDialog from './DirPickerDialog.vue'
-import { api } from '../api'
+import { api, errorText } from '../api'
 import { getByPath, setByPath } from '../schema'
 import { usePendingFiles, useToast } from '../store'
 
@@ -50,7 +50,7 @@ async function loadFile(path: string): Promise<FileEntry> {
     }
     return { path, streams: groups, error: '' }
   } catch (error) {
-    return { path, streams: empty, error: error instanceof Error ? error.message : String(error) }
+    return { path, streams: empty, error: errorText(error) }
   }
 }
 

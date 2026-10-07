@@ -9,6 +9,7 @@ const open = ref(false)
 
 const totalMs = computed(() => props.calls.reduce((sum, call) => sum + (call.ms ?? 0), 0))
 const failedCount = computed(() => props.calls.filter(call => call.ok === false || call.denied === true).length)
+const unfinishedCount = computed(() => props.calls.filter(call => call.result === undefined).length)
 const summaryNames = computed(() => [...new Set(props.calls.map(call => toolLabel(call.name)))].join('、'))
 
 function pretty(text: string): string {
@@ -22,18 +23,20 @@ function pretty(text: string): string {
 function statusText(call: ToolCallView): string {
   if (call.unauthorized) return '未授权（当前级别不含它）'
   if (call.denied) return '用户拒绝'
+  if (call.result === undefined) return '未完成（本轮被中断）'
   if (call.ok === false) return '失败'
   return '完成'
 }
 </script>
 
 <template>
-  <div class="tool-card" :class="{ 'tool-card-failed': failedCount > 0 }">
+  <div class="tool-card" :class="{ 'tool-card-failed': failedCount > 0 || unfinishedCount > 0 }">
     <div class="tool-card-head" @click="open = !open">
       <span class="tool-card-title">工具调用 ×{{ props.calls.length }}</span>
       <span class="tool-card-names">{{ summaryNames }}</span>
       <span class="muted">{{ totalMs }} ms</span>
       <span v-if="failedCount > 0" class="txt-red">{{ failedCount }} 个未成功</span>
+      <span v-else-if="unfinishedCount > 0" class="txt-red">{{ unfinishedCount }} 个未完成</span>
       <span class="muted" style="margin-left: auto">{{ open ? '收起' : '展开' }}</span>
     </div>
     <div v-if="open" class="tool-card-body">

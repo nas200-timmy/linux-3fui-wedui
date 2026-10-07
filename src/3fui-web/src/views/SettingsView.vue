@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api, type TlsStatus } from '../api'
+import { api, type TlsStatus, errorText } from '../api'
 import { useAuth, useToast } from '../store'
 import ModernComboBox from '../components/ModernComboBox.vue'
 
@@ -21,7 +21,7 @@ async function saveAuth(enable: boolean) {
     await auth.refresh()
     toast.push('ok', enable ? '登录认证已启用' : '登录认证已停用')
   } catch (error) {
-    toast.push('err', String(error instanceof Error ? error.message : error))
+    toast.push('err', errorText(error))
   } finally {
     authBusy.value = false
   }
@@ -89,7 +89,7 @@ function load() {
 }
 
 function saveSettings() {
-  api.settings.put(settings.value).then(() => toast.push('ok', '设置已保存')).catch(error => toast.push('err', String(error)))
+  api.settings.put(settings.value).then(() => toast.push('ok', '设置已保存')).catch(error => toast.push('err', errorText(error)))
 }
 
 function onNumber(key: string, event: Event) {
@@ -109,7 +109,7 @@ async function installTls() {
     }
     load()
   } catch (error) {
-    toast.push('err', String(error))
+    toast.push('err', errorText(error))
   }
 }
 
@@ -117,7 +117,7 @@ function removeTls() {
   api.tls.remove().then(() => {
     toast.push('ok', 'HTTPS 已停用')
     load()
-  }).catch(error => toast.push('err', String(error)))
+  }).catch(error => toast.push('err', errorText(error)))
 }
 
 onMounted(load)

@@ -181,6 +181,41 @@ export interface ToolCatalog {
   tools: AgentToolDef[]
 }
 
+/**
+ * 从任意错误值里取一句可读文案。
+ * 上游端点常返回 `{"error":{"message":"…","type":"…"}}`（嵌套对象）——直接塞进 Error 就会变成
+ * `[object Object]`（Agent 页踩过），所以统一走这里逐层剥。
+ */
+export function errorText(error: unknown, maxLength = 600): string {
+  const pick = (value: unknown): string => {
+    if (value === null || value === undefined) return ''
+    if (typeof value === 'string') return value
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+    if (value instanceof Error) return value.message
+    if (typeof value === 'object') {
+      const record = value as Record<string, unknown>
+      for (const key of ['message', 'error', 'detail', 'title']) {
+        const nested = record[key]
+        if (typeof nested === 'string' && nested.trim() !== '') return nested
+        if (nested && typeof nested === 'object') {
+          const deeper = pick(nested)
+          if (deeper !== '') return deeper
+        }
+      }
+      try {
+        return JSON.stringify(value)
+      } catch {
+        return ''
+      }
+    }
+    return ''
+  }
+
+  const text = pick(error).trim().replace(/\s+/g, ' ')
+  if (text === '') return '未知错误'
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -194,7 +229,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let message = `${response.status} ${response.statusText}`
     try {
       const body = await response.json()
-      if (body?.error) message = body.error
+      const detail = errorText(body, 400)
+      if (detail !== '未知错误') message = detail
     } catch {
       /* 忽略非 JSON 错误体 */
     }

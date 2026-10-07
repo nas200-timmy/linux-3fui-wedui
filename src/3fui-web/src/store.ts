@@ -98,6 +98,21 @@ export const useWsStatus = defineStore('wsStatus', () => {
 // v4：默认值改为「全保留」策略（全音轨/字幕/元数据），旧缓存的空白流控制字段会挡住新默认值
 const PRESET_CACHE_KEY = 'linux-3fui-preset-v4'
 
+// ── 队列实时事件：App.vue 的全局 /ws 把 event/task/progress/encoder-switch 分流到这里，
+//    Agent 视图消费它生成「⚙ harness 通知」（不新开 WebSocket 连接）──
+export interface QueueFeedItem { seq: number; data: Record<string, unknown> }
+
+export const useQueueFeed = defineStore('queueFeed', () => {
+  const events = ref<QueueFeedItem[]>([])
+  let seq = 0
+  function push(data: Record<string, unknown>) {
+    seq += 1
+    // 只留最近 200 条，防止长跑任务把内存顶满
+    events.value = [...events.value, { seq, data }].slice(-200)
+  }
+  return { events, push }
+})
+
 export const useCurrentPreset = defineStore('currentPreset', () => {
   const preset = ref<PresetData>(newPreset())
   const saveName = ref('')

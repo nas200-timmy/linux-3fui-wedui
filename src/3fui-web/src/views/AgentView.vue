@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, type AgentToolDef, type CatalogModel, type CatalogProvider, type PresetData } from '../api'
-import { useCurrentPreset, usePendingFiles, useToast } from '../store'
+import { api, errorText, type AgentToolDef, type CatalogModel, type CatalogProvider, type PresetData } from '../api'
+import { useCurrentPreset, usePendingFiles, useQueueFeed, useToast } from '../store'
 import { marked } from '../markdown'
 import ModernComboBox from '../components/ModernComboBox.vue'
 import ProviderPickerDialog from '../components/ProviderPickerDialog.vue'
@@ -19,8 +19,14 @@ import {
 } from '../agentTools'
 
 interface Message {
-  role: 'user' | 'assistant' | 'tool'
+  role: 'user' | 'assistant' | 'tool' | 'harness'
   content: string
+  /** 思考过程（reasoning_content 等字段）；只展示，绝不回灌上游 */
+  reasoning?: string
+  /** 思考耗时（首个 reasoning 分片到最后一个的间隔，毫秒） */
+  reasoningMs?: number
+  /** 思考块是否被用户折叠 */
+  reasoningCollapsed?: boolean
   /** assistant 请求的工具调用（带执行结果，用于渲染工具卡片） */
   tool_calls?: ToolCallView[]
   /** role='tool' 时回灌给上游的调用 ID 与工具名 */
@@ -30,6 +36,12 @@ interface Message {
 interface Conversation { id: string; title: string; time: string; messages: Message[] }
 
 const STORAGE_KEY = 'linux-3fui-agent-conversations'
+const BROADCAST_KEY = 'linux-3fui-agent-broadcast'
+/** 单条思考过程最多存多少字符（避免会话无限膨胀） */
+const REASONING_LIMIT = 20000
+/** harness 通知：进 system 区块的最近条数 / 单会话总量上限 */
+const HARNESS_KEEP = 20
+const HARNESS_LIMIT = 200
 
 const 选项 = (values: string[]) => values.map(v => ({ value: v, label: v }))
 const ONLINE_MODES = 选项(['本地联网', '端点联网', '禁用联网'])
@@ -44,10 +56,13 @@ const REASONING_LEVELS = [{ value: '', label: '默认' }, ...选项(['low', 'med
 const MAX_ROUNDS = 12
 /** 回灌给模型的单个工具结果最多多少字符（对齐上游 Form_v6_Agent_运行.vb:287 的 16000） */
 const TOOL_RESULT_LIMIT = 16000
+/** 思考过程可能用的字段名（各家不一样，按顺序取第一个出现的） */
+const REASONING_KEYS = ['reasoning_content', 'reasoning', 'reasoning_text', 'thinking']
 
 const toast = useToast()
 const currentPresetStore = useCurrentPreset()
 const pendingFilesStore = usePendingFiles()
+const queueFeed = useQueueFeed()
 const conversations = ref<Conversation[]>([])
 const activeId = ref('')
 const input = ref('')
@@ -64,20 +79,44 @@ const streaming = ref(false)
 const abort = ref<AbortController | null>(null)
 const showConfig = ref(false)
 const showTips = ref(false)
+/** 任务播报（harness 通知）开关，默认开 */
+const broadcastFeed = ref(true)
+/** 待处理的通知条数（用来显示「让 Agent 看看」按钮） */
+const pendingNoticeCount = ref(0)
 
 /** 写操作确认卡（挂起时循环停在这里等用户点） */
 const pendingConfirm = ref<{ tool: AgentToolDef; args: Record<string, unknown>; settle: (ok: boolean) => void } | null>(null)
 /** loadConfig 期间不要触发保存（否则开页面就会回写设置） */
 let applyingConfig = false
+/** 本次会话关注的任务 ID（工具结果里出现过的）——只有这些任务会被播报 */
+const trackedTaskIds = new Set<string>()
+/** 播报目标会话（工具调用发生在哪个会话就播报到哪里） */
+let feedConversationId = ''
+/** 已消费到哪条 WS 事件 */
+let feedCursor = 0
+/** 每任务的节流记录：任务ID → { 上次通知时间, 上次进度档, 最近一分钟条数 } */
+const feedThrottle = new Map<string, { at: number; bucket: number; windowStart: number; inWindow: number }>()
 
-const SYSTEM_PROMPT =
-  '你是 linux-3fui 的智能副驾驶。linux-3fui 是 FFmpegFreeUI（3FUI）的 Linux/网页版，一个面向进阶用户的 FFmpeg 交互外壳。' +
-  '你熟悉视频压制、x264/x265/AV1、NVENC/QSV/VAAPI 硬件编码、滤镜（scale/crop/yadif/deband/subtitles 等）、色彩管理（HDR/SDR 转换）、批量转码流程。' +
-  '请用简体中文，简明专业地回答编码相关问题。'
+const SYSTEM_PROMPT = [
+  '你是 linux-3fui 的智能副驾驶。linux-3fui 是 FFmpegFreeUI（3FUI）的 Linux/网页版，一个面向进阶用户的 FFmpeg 交互外壳（参数面板 / 准备文件 / 编码队列 / 媒体信息 / 性能监控）。',
+  '你熟悉视频压制、x264/x265/AV1、NVENC/QSV/VAAPI 硬件编码、滤镜（scale/crop/yadif/deband/subtitles 等）、色彩管理（HDR/SDR 转换）、批量转码流程。',
+  '',
+  '工作方式：',
+  '1. 需要真实状态（当前参数、队列、任务日志、媒体文件、硬件）时**用工具去拿**，不要凭空猜测参数值。',
+  '2. **改了参数就要自检**：用 get_parameter_panel_state(include_command_preview=true) 看一眼生成出来的 ffmpeg 命令行，确认改动按预期生效后再汇报，并把关键片段贴给用户。',
+  '3. 计划要分步时，一次只改一步、改完自检再进入下一步，不要把一堆改动一次性做完（出问题不好定位）。',
+  '4. 同一个工具不要反复调用拿同样的数据；参数写错（未知字段/未知枚举值）时按返回值里给的合法取值改正再试。',
+  '5. 写操作（改参数、改队列、存预设、入队）会由用户逐次确认：被拒绝就换方案或先解释原因，**不要原样重试**。',
+  '6. 权限级别决定你能用哪些工具：安全区域只能读写参数面板；环境控制再加队列/预设/准备文件/技能资料。级别不够时直接说明，并告诉用户去底部「权限级别」切换。',
+  '7. 软件本体会用「⚙ harness 通知」的形式主动告诉你任务进展（开始/进度/错误/编码器切换等）。那是软件发来的，不是你或用户说的话；拿到后据此调整判断，必要时用工具核实。',
+  '8. 不确定 ffmpeg 用法、参数含义或本项目行为时，先 list_agent_skills → read_agent_skill_reference 查内置资料，别硬编。',
+  '',
+  '回答要求：用简体中文；对比、选型、参数清单优先用 **markdown 表格**；命令与代码放代码块；不要吹嘘，不确定就说不确定。',
+].join('\n')
 
 const active = computed(() => conversations.value.find(c => c.id === activeId.value))
 const messages = computed<Message[]>(() => active.value?.messages ?? [])
-const tokenCount = computed(() => Math.round(messages.value.reduce((sum, m) => sum + m.content.length, 0) / 2))
+const tokenCount = computed(() => Math.round(messages.value.reduce((sum, m) => sum + m.content.length + (m.reasoning?.length ?? 0), 0) / 2))
 
 // ── token 预算（原版格式：百分比 | 已用 / 预算）──
 const TOKEN_BUDGET = 200000
@@ -387,6 +426,35 @@ function load() {
   } catch { conversations.value = [] }
   if (conversations.value.length === 0) newConversation()
   else activeId.value = conversations.value[0].id
+  healDanglingToolCalls()
+}
+
+/**
+ * 自愈：历史里「有 tool_calls 但没有配对 tool 结果」的调用（上一轮被中断/刷新，或旧版本留下的），
+ * 补一条 tool 消息，否则下次请求会带着残缺协议发出去（很多端点直接 400）。
+ */
+function healDanglingToolCalls() {
+  let healed = 0
+  for (const conv of conversations.value) {
+    for (const message of conv.messages) {
+      if (message.role !== 'assistant' || !message.tool_calls || message.tool_calls.length === 0) continue
+      for (const call of message.tool_calls) {
+        const hit = conv.messages.some(item => item.role === 'tool' && item.tool_call_id === call.id)
+        if (hit) continue
+        conv.messages.push({
+          role: 'tool',
+          content: '（历史遗留：该工具调用没有执行结果）',
+          tool_call_id: call.id,
+          name: call.name,
+        })
+        healed += 1
+      }
+    }
+  }
+  if (healed > 0) {
+    persist()
+    toast.push('err', `已修复 ${healed} 个未完成的工具调用（历史遗留）`)
+  }
 }
 
 function newConversation() {
@@ -499,18 +567,34 @@ function browserToolContext(): BrowserToolContext {
 }
 
 /** 组装发给上游的消息：assistant 带 tool_calls 时 content 置 null，工具结果用 role='tool' + tool_call_id。 */
+/** harness 通知区块：软件本体主动播报的内容，以 harness 名义拼进首条 system 消息 */
+function harnessBlock(conv: Conversation): string {
+  const notices = conv.messages.filter(message => message.role === 'harness')
+  if (notices.length === 0) return ''
+  const recent = notices.slice(-HARNESS_KEEP)
+  const omitted = notices.length - recent.length
+  const lines = recent.map(notice => `- ${notice.content}`)
+  return [
+    '',
+    '',
+    '【harness 通知（非用户发言）】',
+    '以下是 linux-3fui 软件本体（任务引擎）主动播报的通知，**不是用户说的话**，也不是你自己之前的输出。',
+    '带时间戳的是播报时间；据此判断任务进度、是否需要核实或给出下一步。',
+    ...lines,
+    omitted > 0 ? `（另有 ${omitted} 条更早的通知已省略）` : '',
+  ].filter(line => line !== '').join('\n')
+}
+
 function buildOutgoingMessages(conv: Conversation): Record<string, unknown>[] {
   const messages: Record<string, unknown>[] = [
     {
       role: 'system',
-      content: `${SYSTEM_PROMPT}\n联网设置：${onlineMode.value}；权限级别：${permissionName.value}（当前可用工具 ${toolCatalog.value.length} 个）；推理级别：${reasoningEffort.value || '默认'}。\n需要读参数面板、改参数、看队列或控制任务时**用工具**去拿真实状态，不要凭猜。`,
+      content: `${SYSTEM_PROMPT}\n\n运行环境：联网设置＝${onlineMode.value}；权限级别＝${permissionName.value}（当前可用工具 ${toolCatalog.value.length} 个）；推理级别＝${reasoningEffort.value || '默认'}。${harnessBlock(conv)}`,
     },
   ]
   for (const message of conv.messages) {
-    if (message.role === 'tool') {
-      messages.push({ role: 'tool', tool_call_id: message.tool_call_id, name: message.name, content: message.content })
-      continue
-    }
+    if (message.role === 'harness') continue // 已折进 system 区块
+    if (message.role === 'tool') continue // 随 assistant 的 tool_calls 一起发（见下）
     if (message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0) {
       messages.push({
         role: 'assistant',
@@ -521,6 +605,17 @@ function buildOutgoingMessages(conv: Conversation): Record<string, unknown>[] {
           function: { name: call.name, arguments: call.arguments },
         })),
       })
+      // 每个 tool_call 必须有配对的 tool 结果，否则上游直接 400；
+      // 被中断的调用（刷新/停止）补一条说明，保证协议完整。
+      for (const call of message.tool_calls) {
+        const hit = conv.messages.find(item => item.role === 'tool' && item.tool_call_id === call.id)
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: call.name,
+          content: hit?.content ?? '（本轮被中断，该工具没有执行）',
+        })
+      }
       continue
     }
     if (message.role === 'assistant' && message.content === '') continue
@@ -538,13 +633,18 @@ function parseToolArguments(raw: string): Record<string, unknown> {
   }
 }
 
-/** 读一轮 SSE：正文累加到 assistant.content，tool_calls 交给分片累加器 */
+/**
+ * 读一轮 SSE：正文累加到 assistant.content，思考过程累加到 assistant.reasoning，
+ * tool_calls 交给分片累加器；流内的 error 事件也变成可见文本（否则会静默变成空回复）。
+ */
 async function readStream(response: Response, assistant: Message): Promise<ToolCallView[]> {
   if (!response.body) throw new Error('响应无内容流')
   const accumulator = createToolCallAccumulator()
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let reasoningStart = 0
+  let reasoningEnd = 0
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
@@ -557,14 +657,38 @@ async function readStream(response: Response, assistant: Message): Promise<ToolC
       const data = trimmed.slice(5).trim()
       if (data === '[DONE]') continue
       try {
-        const chunk = JSON.parse(data) as { choices?: { delta?: { content?: string; tool_calls?: unknown }; message?: { content?: string } }[] }
+        const chunk = JSON.parse(data) as {
+          error?: unknown
+          choices?: { delta?: Record<string, unknown>; message?: { content?: string }; finish_reason?: string }[]
+        }
+        // 200 但流里带错误（部分端点这么报错）
+        if (chunk.error !== undefined) {
+          assistant.content += `\n\n⚠ 端点返回错误：${errorText(chunk.error)}`
+          continue
+        }
         const choice = chunk.choices?.[0]
-        const piece = choice?.delta?.content ?? choice?.message?.content
+        const delta = choice?.delta ?? {}
+        const piece = (delta['content'] as string | undefined) ?? choice?.message?.content
         if (typeof piece === 'string' && piece !== '') assistant.content += piece
-        if (choice?.delta?.tool_calls) accumulator.push(choice.delta.tool_calls)
+
+        for (const key of REASONING_KEYS) {
+          const thought = delta[key]
+          if (typeof thought === 'string' && thought !== '') {
+            if (reasoningStart === 0) reasoningStart = Date.now()
+            reasoningEnd = Date.now()
+            const merged = (assistant.reasoning ?? '') + thought
+            assistant.reasoning = merged.length > REASONING_LIMIT ? `${merged.slice(0, REASONING_LIMIT)}…（思考过程过长已截断）` : merged
+            break
+          }
+        }
+        if (choice?.finish_reason === 'content_filter') {
+          assistant.content += '\n\n⚠ 该轮输出被端点内容策略拦截（finish_reason=content_filter）。'
+        }
+        if (delta['tool_calls']) accumulator.push(delta['tool_calls'])
       } catch { /* 跳过无法解析的 SSE 行 */ }
     }
   }
+  if (reasoningStart > 0) assistant.reasoningMs = Math.max(0, reasoningEnd - reasoningStart)
   return accumulator.result()
 }
 
@@ -603,7 +727,7 @@ async function executeToolCalls(conv: Conversation, calls: ToolCallView[], signa
           call.denied = true
           text = '已取消：用户中止了本轮。'
         } else {
-          text = `工具执行失败：${error instanceof Error ? error.message : String(error)}`
+          text = `工具执行失败：${errorText(error)}`
         }
       }
     }
@@ -611,8 +735,157 @@ async function executeToolCalls(conv: Conversation, calls: ToolCallView[], signa
     call.ms = Date.now() - started
     call.result = text.length > TOOL_RESULT_LIMIT ? `${text.slice(0, TOOL_RESULT_LIMIT)}…（已截断，原文 ${text.length} 字符）` : text
     conv.messages.push({ role: 'tool', content: call.result, tool_call_id: call.id, name: call.name })
+    trackTasksFrom(text)
     persist()
   }
+}
+
+// ── B2：harness 通告通道 ──
+// 队列事件（WS 分流到 useQueueFeed）按节流规则变成「⚙ harness 通知」写进对话，
+// 并在每轮请求里以 harness 名义折进 system 区块——让软件本体能主动告诉模型现在什么情况。
+const KEY_LOG = /(错误|失败|Error|ERROR|error|退出码|终止|取消|开始|完成|成功|Unable|Invalid|No such|not found)/
+
+interface TaskPace { windowStart: number; count: number; bucket: number; status: string; line: string }
+const feedPace = new Map<string, TaskPace>()
+const taskNames = new Map<string, string>()
+
+function paceOf(id: string): TaskPace {
+  const hit = feedPace.get(id)
+  if (hit) return hit
+  const fresh: TaskPace = { windowStart: Date.now(), count: 0, bucket: -1, status: '', line: '' }
+  feedPace.set(id, fresh)
+  return fresh
+}
+
+/** 出通知（含节流：每任务每分钟最多 6 条） */
+function noticeTask(id: string, text: string, patch: Partial<TaskPace> = {}) {
+  const pace = paceOf(id)
+  const now = Date.now()
+  if (now - pace.windowStart > 60_000) {
+    pace.windowStart = now
+    pace.count = 0
+  }
+  if (pace.count >= 6) return
+  pace.count += 1
+  Object.assign(pace, patch)
+  pushHarnessNotice(`任务「${taskNames.get(id) ?? id.slice(0, 8)}」${text}`)
+}
+
+/** 追加一条 harness 通知（相邻重复直接吞掉；总量超上限丢最旧） */
+function pushHarnessNotice(text: string) {
+  const conv = conversations.value.find(item => item.id === feedConversationId) ?? active.value
+  if (!conv) return
+  const content = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${text}`
+  const last = conv.messages[conv.messages.length - 1]
+  if (last && last.role === 'harness' && last.content.endsWith(text)) return
+  conv.messages.push({ role: 'harness', content })
+  const noticeCount = conv.messages.filter(item => item.role === 'harness').length
+  if (noticeCount > HARNESS_LIMIT) {
+    let drop = noticeCount - HARNESS_LIMIT
+    conv.messages = conv.messages.filter(item => {
+      if (item.role === 'harness' && drop > 0) {
+        drop -= 1
+        return false
+      }
+      return true
+    })
+  }
+  pendingNoticeCount.value += 1
+  persist()
+}
+
+/** 从工具结果里收集"本次会话关注的任务 ID"（队列任务 ID 是 32 位十六进制） */
+function trackTasksFrom(text: string) {
+  const hits = text.match(/\b[0-9a-f]{32}\b/gi) ?? []
+  for (const id of hits) {
+    const lower = id.toLowerCase()
+    if (trackedTaskIds.has(lower)) continue
+    trackedTaskIds.add(lower)
+    feedConversationId = feedConversationId || active.value?.id || ''
+  }
+}
+
+/** 消费新的队列事件 → harness 通知 */
+function processQueueFeed() {
+  const latest = queueFeed.events.at(-1)?.seq ?? 0
+  if (!broadcastFeed.value) {
+    feedCursor = latest
+    return
+  }
+  const fresh = queueFeed.events.filter(item => item.seq > feedCursor)
+  if (fresh.length === 0) return
+  feedCursor = latest
+
+  for (const item of fresh) {
+    const data = item.data
+    const type = String(data.type ?? '')
+    if (type === 'event') {
+      const taskId = String(data.taskId ?? '').toLowerCase()
+      const log = data.log as { 文本?: string; 阶段名?: string; 是否错误?: boolean } | null | undefined
+      if (!taskId || !log || !trackedTaskIds.has(taskId)) continue
+      const text = String(log.文本 ?? '').trim()
+      if (text === '') continue
+      const stage = log.阶段名 ? `[${log.阶段名}] ` : ''
+      if (log.是否错误 === true) {
+        noticeTask(taskId, `错误：${stage}${text}`)
+        continue
+      }
+      if (!KEY_LOG.test(text)) continue
+      noticeTask(taskId, `输出：${stage}${text}`)
+      continue
+    }
+    if (type === 'task') {
+      const task = (data.task ?? {}) as Record<string, unknown>
+      const id = String(task.ID ?? '').toLowerCase()
+      if (!id || !trackedTaskIds.has(id)) continue
+      if (task.任务名称) taskNames.set(id, String(task.任务名称))
+      const status = String(task.状态 ?? '')
+      const pace = paceOf(id)
+      if (status === '' || status === pace.status) continue
+      noticeTask(id, `状态变为「${status}」`, { status })
+      continue
+    }
+    if (type === 'progress') {
+      const running = Array.isArray(data.tasks) ? (data.tasks as Record<string, unknown>[]) : []
+      for (const task of running) {
+        const id = String(task.ID ?? '').toLowerCase()
+        if (!id || !trackedTaskIds.has(id)) continue
+        if (task.任务名称) taskNames.set(id, String(task.任务名称))
+        const percent = Number(task.百分比 ?? 0)
+        const bucket = Math.floor((Number.isFinite(percent) ? percent : 0) / 10)
+        const pace = paceOf(id)
+        const line = String(task.最新底部日志文本 ?? '').trim()
+        if (bucket > pace.bucket) {
+          const detail = [task.进度文本, task.效率文本, task.输出大小文本, task.时间文本]
+            .map(value => String(value ?? '').trim())
+            .filter(value => value !== '')
+            .join(' · ')
+          noticeTask(id, `进度 ${Math.round(percent)}%${detail ? ` · ${detail}` : ''}`, { bucket, line })
+          continue
+        }
+        // 进度没跨档：只有出现关键日志行时才播报
+        if (line === '' || line === pace.line || !KEY_LOG.test(line)) continue
+        noticeTask(id, `输出：${line}`, { line })
+      }
+      continue
+    }
+    if (type === 'encoder-switch') {
+      const id = String(data.任务ID ?? '').toLowerCase()
+      const name = String(data.任务名称 ?? '')
+      if (name) taskNames.set(id, name)
+      const text = `编码器自动切换：${String(data.原编码器 ?? '')} → ${String(data.新编码器 ?? '')}（${String(data.触发方式 ?? '')}）原因：${String(data.原因 ?? '')}`
+      if (id && trackedTaskIds.has(id)) noticeTask(id, text)
+      else pushHarnessNotice(text)
+    }
+  }
+}
+
+/** 「让 Agent 看看」：把最新通知交给模型处理（不自动触发，避免烧 token 和突然插话） */
+function askAgentAboutNotices() {
+  if (streaming.value) return
+  pendingNoticeCount.value = 0
+  input.value = '（harness 通知）请结合上面最新的任务情况，说明现在的进度，并给出下一步建议。'
+  void send()
 }
 
 async function send() {
@@ -628,6 +901,8 @@ async function send() {
   if (!conv) return
   const content = attachmentBlock ? (text ? `${attachmentBlock}\n\n${text}` : attachmentBlock) : text
   conv.messages.push({ role: 'user', content })
+  feedConversationId = conv.id
+  pendingNoticeCount.value = 0
   attachments.value = []
   input.value = ''
   streaming.value = true
@@ -646,8 +921,20 @@ async function send() {
         toolChoice: hasTools ? 'auto' : undefined,
       }, controller.signal)
       if (!response.ok) {
-        const body = await response.json().catch(() => ({ error: response.statusText }))
-        throw new Error((body as { error?: string }).error ?? `HTTP ${response.status}`)
+        // 先读文本再试 JSON：有些端点报错返回 HTML / 纯文本，而且错误体常常是
+        // {"error":{"message":"…"}} 这种嵌套对象——直接塞进 Error 就会变成 [object Object]
+        const raw = await response.text().catch(() => '')
+        let detail = raw.trim()
+        if (detail !== '') {
+          try {
+            detail = errorText(JSON.parse(detail), 600)
+          } catch {
+            detail = detail.length > 600 ? `${detail.slice(0, 600)}…` : detail
+          }
+        } else {
+          detail = response.statusText
+        }
+        throw new Error(`HTTP ${response.status}：${detail}`)
       }
       const assistant: Message = { role: 'assistant', content: '' }
       conv.messages.push(assistant)
@@ -664,9 +951,10 @@ async function send() {
   } catch (error) {
     if ((error as Error).name !== 'AbortError') {
       // 写回发起请求的会话：流式期间用户可能已切换到其他对话
+      const text = `请求失败：${errorText(error)}`
       const last = conv.messages[conv.messages.length - 1]
-      if (last && last.role === 'assistant') last.content = last.content || `请求失败：${(error as Error).message}`
-      else conv.messages.push({ role: 'assistant', content: `请求失败：${(error as Error).message}` })
+      if (last && last.role === 'assistant') last.content = last.content || text
+      else conv.messages.push({ role: 'assistant', content: text })
     }
   } finally {
     streaming.value = false
@@ -681,6 +969,10 @@ function stop() {
   abort.value?.abort()
   // 挂起的写操作确认也要收尾，否则循环会一直等在那里
   settleConfirm(false)
+  if (streaming.value && feedConversationId !== '') {
+    // 让模型下一轮知道「用户喊停了」，而不是以为工具调用还在进行
+    pushHarnessNotice('用户中止了本轮（Agent 的工具循环被打断）')
+  }
 }
 
 onMounted(() => {
@@ -689,6 +981,16 @@ onMounted(() => {
   loadModelHistory()
   restoreProvider()
   void loadCatalog()
+  try {
+    broadcastFeed.value = localStorage.getItem(BROADCAST_KEY) !== '0'
+  } catch { /* 本地存储不可用时保持默认开 */ }
+  watch(broadcastFeed, value => {
+    try {
+      localStorage.setItem(BROADCAST_KEY, value ? '1' : '0')
+    } catch { /* 忽略 */ }
+  })
+  // 队列事件到达即按节流规则生成 harness 通知
+  watch(() => queueFeed.events.at(-1)?.seq ?? 0, processQueueFeed, { immediate: true })
 })
 </script>
 
@@ -818,9 +1120,11 @@ onMounted(() => {
         <div class="muted" style="line-height: 1.9">
           ① 「重载连接」→「模型管理」里选厂商（国内知名优先）自动填端点；<br />
           ② 填 API Key 保存后点「扫描端点模型」，从端点拉真实可用模型；<br />
-          ③ 底部「权限级别」决定 Agent 能用哪些工具：<b>安全区域</b>只能读写参数面板，<b>环境控制</b>再加队列/预设/准备文件；<br />
+          ③ 底部「权限级别」决定 Agent 能用哪些工具：<b>安全区域</b>只能读写参数面板，<b>环境控制</b>再加队列/预设/准备文件/技能资料；<br />
           ④ 需要 Agent 动手时它会发起工具调用——<b>写操作会先弹确认卡</b>，你点允许才执行；<br />
-          ⑤ 输入问题后 Ctrl+Enter 发送，可随时停止；对话记录保存在浏览器本地。
+          ⑤ 推理模型（DeepSeek-R1、GLM、千问等）的<b>思考过程</b>会显示在气泡上方，可折叠；<br />
+          ⑥ 勾选「任务播报」后，任务开始/进度/报错/编码器切换会用 <b>⚙ harness 通知</b> 自动告诉 Agent（节流，不会刷屏）；<br />
+          ⑦ 输入问题后 Ctrl+Enter 发送，可随时停止；对话记录保存在浏览器本地。
         </div>
       </div>
 
@@ -851,12 +1155,28 @@ onMounted(() => {
             class="chat-msg"
             :class="message.role"
           >
-            <div class="role">{{ message.role === 'user' ? '你' : 'Agent' }}</div>
-            <template v-if="message.role === 'assistant'">
-              <div v-if="message.content" v-html="marked(message.content)"></div>
-              <ToolCallCard v-if="message.tool_calls && message.tool_calls.length > 0" :calls="message.tool_calls" />
+            <!-- harness 通知：软件本体主动播报，不是用户也不是 Agent 说的话 -->
+            <template v-if="message.role === 'harness'">
+              <div class="harness-notice">
+                <span class="harness-badge">⚙ harness</span>
+                <span class="harness-text">{{ message.content }}</span>
+              </div>
             </template>
-            <div v-else style="white-space: pre-wrap">{{ message.content }}</div>
+            <template v-else>
+              <div class="role">{{ message.role === 'user' ? '你' : 'Agent' }}</div>
+              <template v-if="message.role === 'assistant'">
+                <div v-if="message.reasoning" class="reasoning-block">
+                  <div class="reasoning-head" @click="message.reasoningCollapsed = !message.reasoningCollapsed">
+                    <span>思考过程（{{ message.reasoning.length }} 字<template v-if="message.reasoningMs !== undefined"> · {{ (message.reasoningMs / 1000).toFixed(1) }}s</template>）</span>
+                    <span class="muted">{{ message.reasoningCollapsed ? '展开' : '收起' }}</span>
+                  </div>
+                  <div v-if="!message.reasoningCollapsed" class="reasoning-body">{{ message.reasoning }}</div>
+                </div>
+                <div v-if="message.content" v-html="marked(message.content)"></div>
+                <ToolCallCard v-if="message.tool_calls && message.tool_calls.length > 0" :calls="message.tool_calls" />
+              </template>
+              <div v-else style="white-space: pre-wrap">{{ message.content }}</div>
+            </template>
           </div>
         </div>
 
@@ -868,6 +1188,13 @@ onMounted(() => {
           @allow="settleConfirm(true)"
           @deny="settleConfirm(false)"
         />
+
+        <!-- harness 有新的通知：不自动打扰，点一下才交给 Agent -->
+        <div v-if="pendingNoticeCount > 0 && !streaming" class="harness-bar">
+          <span class="muted">⚙ 有 {{ pendingNoticeCount }} 条新的任务通知</span>
+          <button class="small" @click="askAgentAboutNotices">让 Agent 看看</button>
+          <button class="small plain" @click="pendingNoticeCount = 0">知道了</button>
+        </div>
 
         <div class="chat-input">
           <textarea v-model="input" rows="2" placeholder="输入问题，Ctrl+Enter 发送" @keydown.ctrl.enter="send" @keydown.meta.enter="send" />
@@ -883,6 +1210,10 @@ onMounted(() => {
           <ModernComboBox v-model="model" :options="modelOptions" watermark="模型选择" :width="200" editable />
           <span class="muted">{{ hasApiKey ? '密钥已配置' : '密钥未配置' }}</span>
           <span class="muted">可用工具 {{ toolCatalog.length }} 个<template v-if="streaming && currentRound > 0"> · 第 {{ currentRound }}/{{ MAX_ROUNDS }} 轮</template></span>
+          <label class="muted harness-toggle" title="任务开始/进度/报错/编码器切换会自动播报给 Agent（以 ⚙ harness 通知的形式）">
+            <input v-model="broadcastFeed" type="checkbox" />
+            任务播报
+          </label>
         </div>
       </div>
     </div>

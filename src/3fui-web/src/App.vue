@@ -13,7 +13,7 @@ import LoginView from './views/LoginView.vue'
 import EncoderSwitchDialog from './components/EncoderSwitchDialog.vue'
 import ContainerCompatDialog from './components/ContainerCompatDialog.vue'
 import { api, openQueueWebSocket } from './api'
-import { useAuth, useEncoderSwitch, usePendingFiles, useToast, useWsStatus } from './store'
+import { useAuth, useEncoderSwitch, usePendingFiles, useQueueFeed, useToast, useWsStatus } from './store'
 import type { EncoderSwitchMessage, PresetData } from './api'
 
 type NavId =
@@ -57,6 +57,7 @@ const toasts = useToast()
 const auth = useAuth()
 const encoderSwitch = useEncoderSwitch()
 const wsStatus = useWsStatus()
+const queueFeed = useQueueFeed()
 const hasEncoderSwitchPending = computed(() => encoderSwitch.pending.value.length > 0)
 const current = ref<NavId>('home')
 const search = ref('')
@@ -67,6 +68,10 @@ const perf = reactive<Record<string, unknown>>({})
 // 编码器切换告知：服务端自动切换编码器后经 WS 推送，由全局弹窗逐条确认（与 QueueView 各自开一条 /ws）
 let socket: WebSocket | null = null
 function applySocketMessage(data: Record<string, unknown>) {
+  // harness 播报：队列事件分流到 store，由 Agent 视图按节流规则生成通知（不新开连接）
+  if (data.type === 'event' || data.type === 'task' || data.type === 'progress' || data.type === 'encoder-switch') {
+    queueFeed.push(data)
+  }
   if (data.type === 'encoder-switch') encoderSwitch.push(data as unknown as EncoderSwitchMessage)
 }
 function connectSocket() {

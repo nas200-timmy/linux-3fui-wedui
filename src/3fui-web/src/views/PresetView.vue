@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { api, copyToClipboard, type PresetData } from '../api'
+import { api, copyToClipboard, errorText, type PresetData } from '../api'
 import { GROUPS, SUB_NAV, findGroup, newPreset, getByPath, setByPath, 默认音频编码器, type FieldDef, type FieldOption, type SectionDef } from '../schema'
 import FormField from '../components/FormField.vue'
 import ModernComboBox from '../components/ModernComboBox.vue'
@@ -302,7 +302,7 @@ async function refreshPreview() {
     const result = await api.presets.preview(preset.value, '<输入文件>', '<输出文件>')
     previewText.value = result.命令行 || ''
   } catch (error) {
-    previewText.value = `生成命令行失败：${String(error)}`
+    previewText.value = `生成命令行失败：${errorText(error)}`
   } finally {
     previewLoading.value = false
   }
@@ -332,14 +332,14 @@ function loadPreset(source: string, name: string) {
   api.presets.load(source, name).then(data => {
     currentPresetStore.replace(data, name)
     toast.push('ok', '已读取预设：' + name)
-  }).catch(error => toast.push('err', String(error)))
+  }).catch(error => toast.push('err', errorText(error)))
 }
 
 function savePreset() {
   if (!saveName.value.trim()) return toast.push('err', '请先填写预设名称')
   api.presets.save('user', saveName.value.trim(), preset.value)
     .then(() => { toast.push('ok', '预设已保存'); refreshPresetList() })
-    .catch(error => toast.push('err', String(error)))
+    .catch(error => toast.push('err', errorText(error)))
 }
 
 // ── 预设管理：单击仅预览（中/右栏显示参数总览与命令行），双击或「读取」才应用 ──
@@ -357,7 +357,7 @@ async function selectPreset(source: 'builtin' | 'user', name: string) {
     try {
       data = await api.presets.load('user', name)
     } catch (error) {
-      return toast.push('err', String(error))
+      return toast.push('err', errorText(error))
     }
   }
   if (!data) return
@@ -369,7 +369,7 @@ async function selectPreset(source: 'builtin' | 'user', name: string) {
   selectedCommandLine.value = '正在生成…'
   api.presets.preview(full, '<输入文件>', '<输出文件>')
     .then(result => { if (seq === previewSeq) selectedCommandLine.value = result.命令行 || '' })
-    .catch(error => { if (seq === previewSeq) selectedCommandLine.value = `生成命令行失败：${String(error)}` })
+    .catch(error => { if (seq === previewSeq) selectedCommandLine.value = `生成命令行失败：${errorText(error)}` })
 }
 
 function applySelectedPreset() {
@@ -391,7 +391,7 @@ function removePreset(name: string) {
       if (selectedPreset.value?.source === 'user' && selectedPreset.value.name === name) selectedPreset.value = null
       refreshPresetList()
     })
-    .catch(error => toast.push('err', String(error)))
+    .catch(error => toast.push('err', errorText(error)))
 }
 
 function exportPreset() {
@@ -410,7 +410,7 @@ function importPreset(event: Event) {
   api.presets.importFile(file).then(result => {
     toast.push('ok', `已导入预设「${result.name}」`)
     refreshPresetList()
-  }).catch(error => toast.push('err', String(error)))
+  }).catch(error => toast.push('err', errorText(error)))
   ;(event.target as HTMLInputElement).value = ''
 }
 
@@ -476,7 +476,7 @@ async function addFilesToQueue() {
       toast.push('ok', `已添加 ${tasks.length} 个任务到队列`)
       pendingStore.clear()
     })
-    .catch(error => toast.push('err', String(error)))
+    .catch(error => toast.push('err', errorText(error)))
     .finally(() => { busy.value = false })
 }
 
