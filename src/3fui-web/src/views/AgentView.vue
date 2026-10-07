@@ -4,7 +4,7 @@ import { api, errorText, type AgentToolDef, type CatalogModel, type CatalogProvi
 import { useCurrentPreset, usePendingFiles, useQueueFeed, useToast } from '../store'
 import { marked } from '../markdown'
 import ModernComboBox from '../components/ModernComboBox.vue'
-import ProviderPickerDialog from '../components/ProviderPickerDialog.vue'
+import ModelManagerDialog from '../components/ModelManagerDialog.vue'
 import ToolCallCard from '../components/ToolCallCard.vue'
 import ToolConfirmCard from '../components/ToolConfirmCard.vue'
 import { providerBaseUrl, providerDocUrl } from '../providers'
@@ -77,7 +77,7 @@ const toolCatalog = ref<AgentToolDef[]>([])
 const currentRound = ref(0)
 const streaming = ref(false)
 const abort = ref<AbortController | null>(null)
-const showConfig = ref(false)
+const showModelManager = ref(false)
 const showTips = ref(false)
 /** 任务播报（harness 通知）开关，默认开 */
 const broadcastFeed = ref(true)
@@ -141,7 +141,6 @@ const providerModels = ref<CatalogModel[]>([])
 const scannedModelIds = ref<string[]>([])
 const scanLoading = ref(false)
 const scanMessage = ref('')
-const showProviderPicker = ref(false)
 const apiKeyInput = ref('')
 const apiKeySaving = ref(false)
 const confirmClearKey = ref(false)
@@ -257,7 +256,6 @@ async function loadProviderModels(id: string) {
 }
 
 function pickProvider(provider: CatalogProvider) {
-  showProviderPicker.value = false
   providerId.value = provider.id
   providerModels.value = []
   try {
@@ -893,7 +891,7 @@ async function send() {
   const attachmentBlock = attachments.value.map(a => `【附件：${a.name}】\n${a.text}`).join('\n\n')
   if ((!text && !attachmentBlock) || streaming.value) return
   if (!endpoint.value.trim()) {
-    showConfig.value = true
+    showModelManager.value = true
     return toast.push('err', '请先配置 Agent 端点（兼容 OpenAI SDK 的 API 地址）')
   }
   rememberModel()
@@ -1018,7 +1016,7 @@ onMounted(() => {
           <button class="small plain txt-red" @click="deleteConversation">删除对话</button>
         </div>
         <div class="flex" style="margin-top: 4px">
-          <button class="small" @click="showConfig = !showConfig">重载连接</button>
+          <button class="small" @click="showModelManager = true">模型管理</button>
           <button class="small" @click="showTips = !showTips">操作提示</button>
         </div>
         <div class="muted mono" style="margin-top: 8px">{{ tokenPercent }}% | {{ tokenCount }} / {{ TOKEN_BUDGET }}</div>
@@ -1048,77 +1046,10 @@ onMounted(() => {
         <div class="muted" style="margin-top: 6px; font-size: 12px">文本类文件读取内容，其他只附文件名；内容随下一条消息一起发送。</div>
       </div>
 
-      <div v-if="showConfig" class="panel-box panel" style="margin-top: 10px">
-        <div class="panel-title">模型管理</div>
-
-        <div class="field-item">
-          <div class="field-label">厂商</div>
-          <div class="field-control flex" style="gap: 6px; flex-wrap: wrap">
-            <button class="small" @click="showProviderPicker = true">{{ selectedProvider === null ? '选择厂商' : '更换厂商' }}</button>
-            <span class="muted" style="font-size: 12px">
-              {{ selectedProvider === null ? (catalog.length > 0 ? `目录收录 ${catalog.length} 家，国内知名优先` : '目录加载中…') : providerLabel }}
-            </span>
-            <button class="small plain" :disabled="catalogLoading" @click="loadCatalog(true)">{{ catalogLoading ? '刷新中…' : '刷新目录' }}</button>
-          </div>
-        </div>
-
-        <div class="field-item" style="margin-top: 6px">
-          <div class="field-label">端点地址</div>
-          <div class="field-control">
-            <input v-model="endpoint" type="text" placeholder="如 https://api.deepseek.com/v1" />
-            <div class="muted" style="font-size: 12px; margin-top: 4px; line-height: 1.6">
-              <template v-if="providerBase">已按「{{ providerLabel }}」自动填写。本地 Ollama / LM Studio 改成 http://127.0.0.1:11434/v1 这类地址即可。</template>
-              <template v-else>选厂商会自动填端点；也可以直接手填任意 OpenAI 兼容地址。</template>
-              <a v-if="providerDoc" class="agent-doc-link" :href="providerDoc" target="_blank" rel="noopener noreferrer">文档 / 申请密钥</a>
-            </div>
-          </div>
-        </div>
-
-        <div class="field-item" style="margin-top: 6px">
-          <div class="field-label">API Key</div>
-          <div class="field-control flex" style="gap: 6px; flex-wrap: wrap">
-            <input
-              v-model="apiKeyInput"
-              type="password"
-              autocomplete="off"
-              style="flex: 1; min-width: 150px"
-              :placeholder="hasApiKey ? '已配置，留空不修改' : '粘贴该厂商的 API Key'"
-            />
-            <button class="small primary" :disabled="apiKeySaving" @click="saveApiKey">保存密钥</button>
-            <button v-if="hasApiKey" class="small danger" :disabled="apiKeySaving" @click="clearApiKey">
-              {{ confirmClearKey ? '确认清除？' : '清除密钥' }}
-            </button>
-          </div>
-          <div class="muted" style="font-size: 12px; margin-top: 4px">
-            {{ hasApiKey ? '服务端已保存密钥，网页不回显明文。' : '尚未配置密钥，填入后保存在服务端 Settings.json。' }}
-          </div>
-        </div>
-
-        <div class="field-item" style="margin-top: 6px">
-          <div class="field-label">模型</div>
-          <div class="field-control flex" style="gap: 6px; flex-wrap: wrap">
-            <ModernComboBox v-model="model" :options="modelOptions" watermark="模型 id" :width="230" editable />
-            <button class="small" :disabled="scanLoading" @click="scanEndpointModels">{{ scanLoading ? '扫描中…' : '扫描端点模型' }}</button>
-          </div>
-          <div class="muted" style="font-size: 12px; margin-top: 4px; line-height: 1.6">
-            {{ modelSourceText === '' ? '点「扫描端点模型」从端点拉取该 Key 下真实可用的模型。' : `候选来源：${modelSourceText}` }}
-            <template v-if="activeModel">· {{ describeModel(activeModel) }}</template>
-          </div>
-        </div>
-
-        <div class="field-item" style="margin-top: 6px">
-          <div class="field-label">推理级别</div>
-          <div class="field-control"><input v-model="reasoningEffort" type="text" placeholder="low / medium / high" /></div>
-        </div>
-
-        <div v-if="scanMessage" class="muted" style="margin-top: 6px; font-size: 12px">{{ scanMessage }}</div>
-        <button class="small primary" style="margin-top: 8px" @click="saveConfig()">保存</button>
-      </div>
-
       <div v-if="showTips" class="panel-box panel" style="margin-top: 10px">
         <div class="panel-title">操作提示</div>
         <div class="muted" style="line-height: 1.9">
-          ① 「重载连接」→「模型管理」里选厂商（国内知名优先）自动填端点；<br />
+          ① 点「模型管理」弹窗选厂商（国内知名优先）自动填端点；<br />
           ② 填 API Key 保存后点「扫描端点模型」，从端点拉真实可用模型；<br />
           ③ 底部「权限级别」决定 Agent 能用哪些工具：<b>安全区域</b>只能读写参数面板，<b>环境控制</b>再加队列/预设/准备文件/技能资料；<br />
           ④ 需要 Agent 动手时它会发起工具调用——<b>写操作会先弹确认卡</b>，你点允许才执行；<br />
@@ -1128,14 +1059,35 @@ onMounted(() => {
         </div>
       </div>
 
-      <ProviderPickerDialog
-        v-if="showProviderPicker"
+      <ModelManagerDialog
+        v-if="showModelManager"
+        v-model:endpoint="endpoint"
+        v-model:model="model"
+        v-model:api-key="apiKeyInput"
+        v-model:reasoning-effort="reasoningEffort"
         :providers="catalog"
-        :selected="providerId"
+        :selected-provider-id="providerId"
+        :provider-label="providerLabel"
+        :provider-base="providerBase"
+        :provider-doc="providerDoc"
         :stale="catalogStale"
         :fetched-at="catalogFetchedAt"
-        @close="showProviderPicker = false"
+        :catalog-loading="catalogLoading"
+        :model-options="modelOptions"
+        :active-model-text="activeModel === null ? '' : describeModel(activeModel)"
+        :scan-loading="scanLoading"
+        :scan-message="scanMessage"
+        :model-source-text="modelSourceText"
+        :has-api-key="hasApiKey"
+        :api-key-saving="apiKeySaving"
+        :confirm-clear-key="confirmClearKey"
+        @close="showModelManager = false"
         @pick="pickProvider"
+        @refresh-catalog="loadCatalog(true)"
+        @scan="scanEndpointModels"
+        @save-key="saveApiKey"
+        @clear-key="clearApiKey"
+        @save="saveConfig()"
       />
     </div>
 
