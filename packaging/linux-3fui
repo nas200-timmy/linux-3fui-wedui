@@ -1,0 +1,16 @@
+#!/bin/sh
+# linux-3fui 前台运行入口（排障用）。
+# 正式运行请走 systemd：sudo systemctl status linux-3fui / journalctl -u linux-3fui -f
+# 这个包装只是把 /etc/linux-3fui/env 的配置读进来后前台启动，方便直接看输出。
+set -e
+
+ENV_FILE=/etc/linux-3fui/env
+if [ -r "$ENV_FILE" ]; then
+    set -a
+    # shellcheck source=/etc/linux-3fui/env
+    . "$ENV_FILE"
+    set +a
+fi
+
+cd /opt/linux-3fui
+exec ./3fui-server "$@"

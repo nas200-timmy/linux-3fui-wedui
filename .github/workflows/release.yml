@@ -183,6 +183,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
+          : "${VERSION:?VERSION 为空——meta job 没给出；nfpm 会静默打出 0.0.0-rc0}"
           nfpm package -f packaging/nfpm.yaml -p deb -t dist/
           nfpm package -f packaging/nfpm.yaml -p rpm -t dist/
 

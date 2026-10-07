@@ -50,7 +50,9 @@ contents:
     file_info:
       mode: 0644
   # ④ 前台调试入口
-  - src: packaging/bin/linux-3fui
+  # ⚠ 别把这个脚本放进 packaging/bin/：.gitignore 的 `bin/` 规则会把整个目录忽略掉，
+  #   于是 CI 里 checkout 出来的包源缺文件（nfpm 报 Matching "./packaging/bin/linux-3fui": file does not exist）
+  - src: packaging/linux-3fui
     dst: /usr/bin/linux-3fui
     file_info:
       mode: 0755
