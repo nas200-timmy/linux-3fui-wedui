@@ -42,8 +42,8 @@ services:
     group_add:
       - "44"    # 宿主 video 组（card0/card1 节点属组）
       - "105"   # 宿主 render 组（renderD128/129 节点属组）
-    # NVIDIA NVENC：宿主机已安装 NVIDIA Container Toolkit（RTX 3070 Mobile）
-    # runtime: nvidia（本机无 NVIDIA，部署闸已确认）
+    # NVIDIA NVENC：宿主需自行安装 NVIDIA Container Toolkit 并开 runtime: nvidia
+    # （本机是 Intel 核显 + AMD 独显，无 NVIDIA，部署闸已确认）
     # ── 权限说明 ──
     # 媒体目录属主通常是宿主 uid 1000，因此覆盖容器运行用户：
     user: "1000:1001"

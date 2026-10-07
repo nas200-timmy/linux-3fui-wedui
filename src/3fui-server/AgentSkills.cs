@@ -125,8 +125,8 @@ public static class AgentSkills
             # 硬件编码器选型与已知坑
 
             ## 本机（引用项目实测结论，换机器需重新探测）
-            - Intel UHD 730：`renderD128`。**HEVC 硬编用 `hevc_vaapi`**，不要用 `hevc_qsv`。
-            - AMD RX 6400：`renderD129`，VAAPI 报 `-22`（amdgpu headless 常见），别用。
+            - Intel 核显：`renderD128`。**HEVC 硬编用 `hevc_vaapi`**，不要用 `hevc_qsv`。
+            - AMD 独显：`renderD129`，VAAPI 报 `-22`（amdgpu headless 常见），别用。
             - 可用性以 `get_system_hardware` 的「硬件编码器」清单为准（它是真实探测结果，不是 `-encoders` 文本匹配）。
 
             ## 各家的参数要求
@@ -137,7 +137,7 @@ public static class AgentSkills
             - **hevc_qsv 在本机不可用**：`Invalid FrameType:0`（MFX 返回空比特流，FFmpeg 源码 qsvenc.c 对应位置可查），
               宿主直装 ffmpeg 同样报错，**属平台级故障，调参无解**，别在这上面花时间。
             - **NVENC**：需要宿主装 NVIDIA Container Toolkit 并在 compose 里开 `runtime: nvidia`；本机无 NVIDIA 卡。
-            - **AV1**：`av1_nvenc`（N 卡 40 系）/ `av1_qsv`（Intel 新核显）/ `libsvtav1`（软编）。本机 Intel UHD 730 的 AV1 QSV 未验证。
+            - **AV1**：`av1_nvenc`（N 卡 40 系）/ `av1_qsv`（Intel 新核显）/ `libsvtav1`（软编）。本机 Intel 核显的 AV1 QSV 未验证。
 
             ## 质量参数怎么选
             - CPU（x264/x265）：CRF 或 2-pass 比特率；x265 的 `slower` 等预设档**不能**给硬件编码器（会报

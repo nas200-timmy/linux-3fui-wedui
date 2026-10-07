@@ -222,7 +222,7 @@
 
 ## QSV 诊断（实测，非容器问题）
 
-本机 Intel UHD 730（Alder Lake-S GT1），HuC/GuC 固件正常认证。ffmpeg 7.1.5 + libvpl2 + libmfx-gen1.2：
+本机 Intel 核显（12 代，HuC/GuC 固件正常认证）。ffmpeg 7.1.5 + libvpl2 + libmfx-gen1.2：
 
 | 组合 | 结果 |
 |---|---|
