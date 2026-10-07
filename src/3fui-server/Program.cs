@@ -31,6 +31,7 @@ builder.Services.AddSingleton<QueueRealtime>();
 builder.Services.AddSingleton<TlsManager>();
 builder.Services.AddSingleton<MediaProbe>();
 builder.Services.AddSingleton<AgentProxy>();
+builder.Services.AddSingleton<AgentTools>();
 builder.Services.AddSingleton<ModelsDevCatalog>();
 builder.Services.AddSingleton<PerfMonitor>();
 builder.Services.AddSingleton(new AuthService(config.DataDir));
@@ -46,6 +47,7 @@ var tls = app.Services.GetRequiredService<TlsManager>();
 var realtime = app.Services.GetRequiredService<QueueRealtime>();
 var mediaProbe = app.Services.GetRequiredService<MediaProbe>();
 var agentProxy = app.Services.GetRequiredService<AgentProxy>();
+var agentTools = app.Services.GetRequiredService<AgentTools>();
 var agentCatalog = app.Services.GetRequiredService<ModelsDevCatalog>();
 var perf = app.Services.GetRequiredService<PerfMonitor>();
 var auth = app.Services.GetRequiredService<AuthService>();
@@ -561,6 +563,10 @@ app.MapGet("/api/agent/config", () =>
         model = settings.AgentModelId,
         reasoningEffort = settings.Agent推理级别,
         extraHeaders = settings.Agent附加请求头,
+        // 这两项是上游就有的设置字段（本轮开始真正生效）
+        permissionLevel = settings.Agent权限级别,
+        permissionName = AgentTools.LevelName(settings.Agent权限级别),
+        onlineMode = settings.Agent联网设置,
     });
 });
 
@@ -574,8 +580,51 @@ app.MapPut("/api/agent/config", async (HttpRequest request) =>
     if (payload.model is not null) settings.AgentModelId = payload.model;
     if (payload.reasoningEffort is not null) settings.Agent推理级别 = payload.reasoningEffort;
     if (payload.extraHeaders is not null) settings.Agent附加请求头 = payload.extraHeaders;
+    if (payload.permissionLevel is not null) settings.Agent权限级别 = Math.Clamp(payload.permissionLevel.Value, AgentTools.LevelSafe, AgentTools.LevelSystem);
+    if (payload.onlineMode is not null) settings.Agent联网设置 = Math.Clamp(payload.onlineMode.Value, 0, 2);
     设置_v6.退出时保存设置();
     return Results.Ok(new { ok = true });
+});
+
+// ── Agent 工具目录（按 Agent权限级别 过滤后才下发；前端只认这份目录）──
+app.MapGet("/api/agent/tools", () =>
+{
+    var level = 设置_v6.实例对象.Agent权限级别;
+    var catalog = agentTools.Catalog(level);
+    return Results.Json(new
+    {
+        permissionLevel = level,
+        permissionName = AgentTools.LevelName(level),
+        count = catalog.Count,
+        tools = catalog,
+    }, JsonOptions.Compact);
+});
+
+// ── 执行一个 server 范围工具（每次调用再校验一次权限，对齐上游 Agent本地工具_v6.vb:235）──
+app.MapPost("/api/agent/tools/{name}", async (string name, HttpRequest request, CancellationToken cancellationToken) =>
+{
+    Microsoft.AspNetCore.Http.IResult BadResult(int status, string message) =>
+        Results.Json(new { error = message }, JsonOptions.Compact, statusCode: status);
+
+    JsonElement args = default;
+    if (request.ContentLength is > 0)
+    {
+        try
+        {
+            using var document = await JsonDocument.ParseAsync(request.Body, cancellationToken: cancellationToken);
+            args = document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return BadResult(StatusCodes.Status400BadRequest, "参数 JSON 无效");
+        }
+    }
+    if (args.ValueKind != JsonValueKind.Object) args = JsonDocument.Parse("{}").RootElement.Clone();
+
+    var outcome = await Task.Run(() => agentTools.Execute(name, args, 设置_v6.实例对象.Agent权限级别), cancellationToken);
+    if (outcome.StatusCode != StatusCodes.Status200OK)
+        return BadResult(outcome.StatusCode, outcome.Result);
+    return Results.Json(new { ok = outcome.Ok, result = outcome.Result }, JsonOptions.Compact);
 });
 
 app.MapPost("/api/agent/chat", (HttpContext context) =>
@@ -722,7 +771,7 @@ internal sealed record ReorderRequest(List<string> ids);
 internal sealed record SyncPresetRequest(List<string>? ids, 预设数据_v6 preset);
 internal sealed record PresetPreviewRequest(预设数据_v6 preset, string? input, string? output);
 internal sealed record TlsUploadRequest(string certPem, string keyPem);
-internal sealed record AgentConfigRequest(string? endpoint, string? apiKey, string? model, string? reasoningEffort, string? extraHeaders);
+internal sealed record AgentConfigRequest(string? endpoint, string? apiKey, string? model, string? reasoningEffort, string? extraHeaders, int? permissionLevel, int? onlineMode);
 // 字段可省：省略即用服务端已保存的端点与密钥
 internal sealed record AgentScanRequest(string? endpoint, string? apiKey);
 internal sealed record EncoderSwitchRespondRequest(string 任务ID, string 选择);

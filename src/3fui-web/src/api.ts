@@ -162,6 +162,25 @@ export interface ModelScanResult {
   models: { id: string; ownedBy: string }[]
 }
 
+/** /api/agent/tools 下发的单个工具（已按 Agent权限级别 过滤） */
+export interface AgentToolDef {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  /** server：服务端执行；browser：参数面板/准备文件，状态在浏览器里，由前端执行 */
+  scope: 'server' | 'browser'
+  level: number
+  levelName: string
+  write: boolean
+}
+
+export interface ToolCatalog {
+  permissionLevel: number
+  permissionName: string
+  count: number
+  tools: AgentToolDef[]
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -257,19 +276,32 @@ export const api = {
   },
 
   agent: {
-    config: () => request<{ endpoint: string; hasApiKey: boolean; model: string; reasoningEffort: string; extraHeaders: string }>('/api/agent/config'),
+    config: () => request<{ endpoint: string; hasApiKey: boolean; model: string; reasoningEffort: string; extraHeaders: string; permissionLevel: number; permissionName: string; onlineMode: number }>('/api/agent/config'),
     saveConfig: (cfg: Record<string, unknown>) => request('/api/agent/config', { method: 'PUT', body: JSON.stringify(cfg) }),
+    // 工具目录（已按权限级别过滤）与 server 范围工具的执行入口
+    tools: () => request<ToolCatalog>('/api/agent/tools'),
+    runTool: (name: string, args: Record<string, unknown>) =>
+      request<{ ok: boolean; result: string }>(`/api/agent/tools/${encodeURIComponent(name)}`, {
+        method: 'POST',
+        body: JSON.stringify(args),
+      }),
     // models.dev 厂商目录：refresh=true 绕过 24h 缓存强制重拉
     catalog: (refresh = false) => request<ProviderCatalog>(`/api/agent/catalog${refresh ? '?refresh=1' : ''}`),
     catalogModels: (providerId: string) => request<ProviderModels>(`/api/agent/catalog/${encodeURIComponent(providerId)}`),
     // 从端点自身拉模型列表；不传字段即用服务端已保存的端点与密钥
     scanModels: (payload: { endpoint?: string; apiKey?: string } = {}) =>
       request<ModelScanResult>('/api/agent/scan', { method: 'POST', body: JSON.stringify(payload) }),
-    chat: (messages: { role: string; content: string }[], model?: string, signal?: AbortSignal) =>
+    chat: (payload: { messages: unknown[]; model?: string; tools?: unknown[]; toolChoice?: string }, signal?: AbortSignal) =>
       fetch('/api/agent/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, model, stream: true }),
+        body: JSON.stringify({
+          messages: payload.messages,
+          model: payload.model,
+          tools: payload.tools,
+          tool_choice: payload.toolChoice,
+          stream: true,
+        }),
         signal,
       }),
   },

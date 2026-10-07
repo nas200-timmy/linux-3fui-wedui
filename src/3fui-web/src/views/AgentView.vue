@@ -1,23 +1,53 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, type CatalogModel, type CatalogProvider } from '../api'
-import { usePendingFiles, useToast } from '../store'
+import { api, type AgentToolDef, type CatalogModel, type CatalogProvider, type PresetData } from '../api'
+import { useCurrentPreset, usePendingFiles, useToast } from '../store'
 import { marked } from '../markdown'
 import ModernComboBox from '../components/ModernComboBox.vue'
 import ProviderPickerDialog from '../components/ProviderPickerDialog.vue'
+import ToolCallCard from '../components/ToolCallCard.vue'
+import ToolConfirmCard from '../components/ToolConfirmCard.vue'
 import { providerBaseUrl, providerDocUrl } from '../providers'
+import {
+  checkBeforeEnqueue,
+  createToolCallAccumulator,
+  runBrowserTool,
+  toOpenAiTools,
+  ToolDenied,
+  type BrowserToolContext,
+  type ToolCallView,
+} from '../agentTools'
 
-interface Message { role: 'user' | 'assistant'; content: string }
+interface Message {
+  role: 'user' | 'assistant' | 'tool'
+  content: string
+  /** assistant 请求的工具调用（带执行结果，用于渲染工具卡片） */
+  tool_calls?: ToolCallView[]
+  /** role='tool' 时回灌给上游的调用 ID 与工具名 */
+  tool_call_id?: string
+  name?: string
+}
 interface Conversation { id: string; title: string; time: string; messages: Message[] }
 
 const STORAGE_KEY = 'linux-3fui-agent-conversations'
 
 const 选项 = (values: string[]) => values.map(v => ({ value: v, label: v }))
 const ONLINE_MODES = 选项(['本地联网', '端点联网', '禁用联网'])
-const ACCESS_LEVELS = 选项(['系统访问', '仅对话'])
+// 权限级别沿用上游三档（设置_v6.Agent权限级别）；档位 2 的文件与命令工具尚未移植
+const PERMISSION_LEVELS = [
+  { value: '0', label: '安全区域' },
+  { value: '1', label: '环境控制' },
+  { value: '2', label: '系统访问' },
+]
 const REASONING_LEVELS = [{ value: '', label: '默认' }, ...选项(['low', 'medium', 'high'])]
+/** 单轮对话里最多允许几轮工具调用（上游没有上限，这里加个保险） */
+const MAX_ROUNDS = 12
+/** 回灌给模型的单个工具结果最多多少字符（对齐上游 Form_v6_Agent_运行.vb:287 的 16000） */
+const TOOL_RESULT_LIMIT = 16000
 
 const toast = useToast()
+const currentPresetStore = useCurrentPreset()
+const pendingFilesStore = usePendingFiles()
 const conversations = ref<Conversation[]>([])
 const activeId = ref('')
 const input = ref('')
@@ -26,11 +56,19 @@ const model = ref('')
 const hasApiKey = ref(false)
 const reasoningEffort = ref('')
 const onlineMode = ref('本地联网')
-const accessLevel = ref('系统访问')
+const permissionLevel = ref('0')
+const permissionName = ref('安全区域')
+const toolCatalog = ref<AgentToolDef[]>([])
+const currentRound = ref(0)
 const streaming = ref(false)
 const abort = ref<AbortController | null>(null)
 const showConfig = ref(false)
 const showTips = ref(false)
+
+/** 写操作确认卡（挂起时循环停在这里等用户点） */
+const pendingConfirm = ref<{ tool: AgentToolDef; args: Record<string, unknown>; settle: (ok: boolean) => void } | null>(null)
+/** loadConfig 期间不要触发保存（否则开页面就会回写设置） */
+let applyingConfig = false
 
 const SYSTEM_PROMPT =
   '你是 linux-3fui 的智能副驾驶。linux-3fui 是 FFmpegFreeUI（3FUI）的 Linux/网页版，一个面向进阶用户的 FFmpeg 交互外壳。' +
@@ -373,21 +411,208 @@ function deleteConversation() {
 }
 
 async function loadConfig() {
+  applyingConfig = true
   try {
     const config = await api.agent.config()
     endpoint.value = config.endpoint
     model.value = config.model
     hasApiKey.value = config.hasApiKey
     reasoningEffort.value = config.reasoningEffort
-    if (config.reasoningEffort) accessLevel.value = '系统访问'
+    permissionLevel.value = String(config.permissionLevel ?? 0)
+    permissionName.value = config.permissionName ?? '安全区域'
     if (providerId.value === '' && config.endpoint !== '') inferProviderFromEndpoint()
-  } catch { /* 配置可能尚未初始化 */ }
+  } catch { /* 配置可能尚未初始化 */ } finally {
+    applyingConfig = false
+  }
+  await loadTools()
 }
+
+/** 拉取按当前权限级别过滤后的工具目录（失败就没有工具，聊天照常） */
+async function loadTools() {
+  applyingConfig = true
+  try {
+    const data = await api.agent.tools()
+    toolCatalog.value = data.tools
+    permissionLevel.value = String(data.permissionLevel)
+    permissionName.value = data.permissionName
+  } catch {
+    toolCatalog.value = []
+  } finally {
+    applyingConfig = false
+  }
+}
+
+watch(permissionLevel, async (next, previous) => {
+  if (applyingConfig || next === previous) return
+  try {
+    await api.agent.saveConfig({ permissionLevel: Number(next) })
+    await loadTools()
+    toast.push('ok', `权限级别已切到「${permissionName.value}」，可用工具 ${toolCatalog.value.length} 个`)
+  } catch (error) {
+    toast.push('err', error instanceof Error ? error.message : String(error))
+  }
+})
 
 function saveConfig(silent = false) {
   api.agent.saveConfig({ endpoint: endpoint.value, model: model.value, reasoningEffort: reasoningEffort.value })
     .then(() => { if (!silent) toast.push('ok', 'Agent 配置已保存') })
     .catch(error => toast.push('err', error instanceof Error ? error.message : String(error)))
+}
+
+// ── 写操作确认（挂起循环等用户点；停止时按拒绝处理）──
+function confirmWrite(tool: AgentToolDef, args: Record<string, unknown>): Promise<boolean> {
+  return new Promise<boolean>(resolve => {
+    pendingConfirm.value = {
+      tool,
+      args,
+      settle: (ok: boolean) => {
+        pendingConfirm.value = null
+        resolve(ok)
+      },
+    }
+  })
+}
+
+function settleConfirm(ok: boolean) {
+  pendingConfirm.value?.settle(ok)
+}
+
+/** 给浏览器侧工具的执行上下文（参数面板与准备文件都在 store 里） */
+function browserToolContext(): BrowserToolContext {
+  return {
+    getPreset: () => currentPresetStore.preset as PresetData,
+    setPreset: next => { currentPresetStore.preset = next },
+    replacePreset: (data, name) => currentPresetStore.replace(data, name),
+    getPendingFiles: () => [...pendingFilesStore.files],
+    setPendingFiles: paths => { pendingFilesStore.files = paths },
+    enqueuePreparedFiles: async () => {
+      const preset = currentPresetStore.preset as PresetData
+      const files = [...pendingFilesStore.files]
+      // 与界面同款预检；容器装不下时不弹兼容对话框，而是把问题交回模型
+      const problem = checkBeforeEnqueue(preset, files)
+      if (problem) throw new Error(problem)
+      const tasks = await api.queue.addTasks(files, preset, currentPresetStore.saveName || undefined)
+      pendingFilesStore.clear()
+      return JSON.stringify({ ok: true, 已入队: tasks.length, 任务: tasks.map(task => ({ ID: task.ID, 任务名称: task.任务名称 })) })
+    },
+  }
+}
+
+/** 组装发给上游的消息：assistant 带 tool_calls 时 content 置 null，工具结果用 role='tool' + tool_call_id。 */
+function buildOutgoingMessages(conv: Conversation): Record<string, unknown>[] {
+  const messages: Record<string, unknown>[] = [
+    {
+      role: 'system',
+      content: `${SYSTEM_PROMPT}\n联网设置：${onlineMode.value}；权限级别：${permissionName.value}（当前可用工具 ${toolCatalog.value.length} 个）；推理级别：${reasoningEffort.value || '默认'}。\n需要读参数面板、改参数、看队列或控制任务时**用工具**去拿真实状态，不要凭猜。`,
+    },
+  ]
+  for (const message of conv.messages) {
+    if (message.role === 'tool') {
+      messages.push({ role: 'tool', tool_call_id: message.tool_call_id, name: message.name, content: message.content })
+      continue
+    }
+    if (message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0) {
+      messages.push({
+        role: 'assistant',
+        content: message.content || null,
+        tool_calls: message.tool_calls.map(call => ({
+          id: call.id,
+          type: 'function',
+          function: { name: call.name, arguments: call.arguments },
+        })),
+      })
+      continue
+    }
+    if (message.role === 'assistant' && message.content === '') continue
+    messages.push({ role: message.role, content: message.content })
+  }
+  return messages
+}
+
+function parseToolArguments(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw || '{}') as unknown
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 读一轮 SSE：正文累加到 assistant.content，tool_calls 交给分片累加器 */
+async function readStream(response: Response, assistant: Message): Promise<ToolCallView[]> {
+  if (!response.body) throw new Error('响应无内容流')
+  const accumulator = createToolCallAccumulator()
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const data = trimmed.slice(5).trim()
+      if (data === '[DONE]') continue
+      try {
+        const chunk = JSON.parse(data) as { choices?: { delta?: { content?: string; tool_calls?: unknown }; message?: { content?: string } }[] }
+        const choice = chunk.choices?.[0]
+        const piece = choice?.delta?.content ?? choice?.message?.content
+        if (typeof piece === 'string' && piece !== '') assistant.content += piece
+        if (choice?.delta?.tool_calls) accumulator.push(choice.delta.tool_calls)
+      } catch { /* 跳过无法解析的 SSE 行 */ }
+    }
+  }
+  return accumulator.result()
+}
+
+/** 一轮工具调用的执行（写操作先过确认卡；未授权/被拒/失败都作为工具结果回灌） */
+async function executeToolCalls(conv: Conversation, calls: ToolCallView[], signal: AbortSignal) {
+  const context = browserToolContext()
+  for (const call of calls) {
+    const started = Date.now()
+    const tool = toolCatalog.value.find(item => item.name === call.name)
+    let text = ''
+    let ok = true
+    if (!tool) {
+      ok = false
+      call.unauthorized = true
+      text = `未授权的工具：${call.name}。当前权限级别「${permissionName.value}」的目录里没有它，已拒绝执行。`
+    } else {
+      try {
+        // 写操作一律先过确认卡（服务端工具与浏览器工具都要；上游只靠提示词，这里是硬确认）
+        if (tool.write) {
+          const allowed = await confirmWrite(tool, parseToolArguments(call.arguments))
+          if (!allowed) throw new ToolDenied()
+        }
+        if (tool.scope === 'server') {
+          const outcome = await api.agent.runTool(call.name, parseToolArguments(call.arguments))
+          ok = outcome.ok
+          text = outcome.result
+        } else {
+          text = await runBrowserTool(call, tool, context)
+        }
+      } catch (error) {
+        ok = false
+        if (error instanceof ToolDenied) {
+          call.denied = true
+          text = '用户拒绝了该操作（没有执行）。请换一个用户能接受的做法，或先说明为什么需要它。'
+        } else if ((error as Error).name === 'AbortError' || signal.aborted) {
+          call.denied = true
+          text = '已取消：用户中止了本轮。'
+        } else {
+          text = `工具执行失败：${error instanceof Error ? error.message : String(error)}`
+        }
+      }
+    }
+    call.ok = ok
+    call.ms = Date.now() - started
+    call.result = text.length > TOOL_RESULT_LIMIT ? `${text.slice(0, TOOL_RESULT_LIMIT)}…（已截断，原文 ${text.length} 字符）` : text
+    conv.messages.push({ role: 'tool', content: call.result, tool_call_id: call.id, name: call.name })
+    persist()
+  }
 }
 
 async function send() {
@@ -402,65 +627,60 @@ async function send() {
   const conv = active.value
   if (!conv) return
   const content = attachmentBlock ? (text ? `${attachmentBlock}\n\n${text}` : attachmentBlock) : text
-  const outgoing = [
-    { role: 'system', content: `${SYSTEM_PROMPT}\n联网设置：${onlineMode.value}；访问级别：${accessLevel.value}；推理级别：${reasoningEffort.value || '默认'}。` },
-    ...conv.messages.map(m => ({ role: m.role, content: m.content })),
-    { role: 'user', content },
-  ]
   conv.messages.push({ role: 'user', content })
-  conv.messages.push({ role: 'assistant', content: '' })
+  attachments.value = []
   input.value = ''
   streaming.value = true
+  currentRound.value = 0
   const controller = new AbortController()
   abort.value = controller
 
   try {
-    const response = await api.agent.chat(outgoing, model.value || undefined, controller.signal)
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({ error: response.statusText }))
-      throw new Error((body as { error?: string }).error ?? `HTTP ${response.status}`)
-    }
-    if (!response.body) throw new Error('响应无内容流')
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let assistant = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed.startsWith('data:')) continue
-        const data = trimmed.slice(5).trim()
-        if (data === '[DONE]') continue
-        try {
-          const chunk = JSON.parse(data)
-          const delta = chunk?.choices?.[0]?.delta?.content ?? chunk?.choices?.[0]?.message?.content
-          if (delta) {
-            assistant += delta
-            conv.messages[conv.messages.length - 1].content = assistant
-          }
-        } catch { /* 跳过无法解析的 SSE 行 */ }
+    for (let round = 1; round <= MAX_ROUNDS; round++) {
+      currentRound.value = round
+      const hasTools = toolCatalog.value.length > 0
+      const response = await api.agent.chat({
+        messages: buildOutgoingMessages(conv),
+        model: model.value || undefined,
+        tools: hasTools ? toOpenAiTools(toolCatalog.value) : undefined,
+        toolChoice: hasTools ? 'auto' : undefined,
+      }, controller.signal)
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({ error: response.statusText }))
+        throw new Error((body as { error?: string }).error ?? `HTTP ${response.status}`)
       }
+      const assistant: Message = { role: 'assistant', content: '' }
+      conv.messages.push(assistant)
+      const calls = await readStream(response, assistant)
+      if (calls.length === 0) { persist(); return }
+      assistant.tool_calls = calls
+      persist()
+      await executeToolCalls(conv, calls, controller.signal)
     }
+    active.value?.messages.push({
+      role: 'assistant',
+      content: `（本轮已经连续调用工具 ${MAX_ROUNDS} 次，先停在这里。可以继续追问，或直接看上面的工具调用结果。）`,
+    })
   } catch (error) {
     if ((error as Error).name !== 'AbortError') {
-      // 写回发起请求的会话：流式期间用户可能已切换到其他对话，active 已是新会话
+      // 写回发起请求的会话：流式期间用户可能已切换到其他对话
       const last = conv.messages[conv.messages.length - 1]
-      last.content = last.content || `请求失败：${(error as Error).message}`
+      if (last && last.role === 'assistant') last.content = last.content || `请求失败：${(error as Error).message}`
+      else conv.messages.push({ role: 'assistant', content: `请求失败：${(error as Error).message}` })
     }
   } finally {
     streaming.value = false
     abort.value = null
+    currentRound.value = 0
+    settleConfirm(false)
     persist()
   }
 }
 
 function stop() {
   abort.value?.abort()
+  // 挂起的写操作确认也要收尾，否则循环会一直等在那里
+  settleConfirm(false)
 }
 
 onMounted(() => {
@@ -598,8 +818,9 @@ onMounted(() => {
         <div class="muted" style="line-height: 1.9">
           ① 「重载连接」→「模型管理」里选厂商（国内知名优先）自动填端点；<br />
           ② 填 API Key 保存后点「扫描端点模型」，从端点拉真实可用模型；<br />
-          ③ 输入问题后 Ctrl+Enter 发送，可随时停止；<br />
-          ④ 对话记录保存在浏览器本地，不上传。
+          ③ 底部「权限级别」决定 Agent 能用哪些工具：<b>安全区域</b>只能读写参数面板，<b>环境控制</b>再加队列/预设/准备文件；<br />
+          ④ 需要 Agent 动手时它会发起工具调用——<b>写操作会先弹确认卡</b>，你点允许才执行；<br />
+          ⑤ 输入问题后 Ctrl+Enter 发送，可随时停止；对话记录保存在浏览器本地。
         </div>
       </div>
 
@@ -623,12 +844,30 @@ onMounted(() => {
             向 3FUI 副驾驶提问：参数推荐、滤镜写法、报错排查、批量转码方案……<br />
             <span class="muted">例如：「N 卡压 AV1 用什么参数」「这段 ffmpeg 报错怎么修」「帮我写一个去色带的滤镜链」</span>
           </div>
-          <div v-for="(message, index) in messages" :key="index" class="chat-msg" :class="message.role">
+          <div
+            v-for="(message, index) in messages"
+            v-show="message.role !== 'tool'"
+            :key="index"
+            class="chat-msg"
+            :class="message.role"
+          >
             <div class="role">{{ message.role === 'user' ? '你' : 'Agent' }}</div>
-            <div v-if="message.role === 'assistant'" v-html="marked(message.content)"></div>
+            <template v-if="message.role === 'assistant'">
+              <div v-if="message.content" v-html="marked(message.content)"></div>
+              <ToolCallCard v-if="message.tool_calls && message.tool_calls.length > 0" :calls="message.tool_calls" />
+            </template>
             <div v-else style="white-space: pre-wrap">{{ message.content }}</div>
           </div>
         </div>
+
+        <!-- 写操作确认卡：挂起循环等用户点允许/拒绝 -->
+        <ToolConfirmCard
+          v-if="pendingConfirm"
+          :tool="pendingConfirm.tool"
+          :args="pendingConfirm.args"
+          @allow="settleConfirm(true)"
+          @deny="settleConfirm(false)"
+        />
 
         <div class="chat-input">
           <textarea v-model="input" rows="2" placeholder="输入问题，Ctrl+Enter 发送" @keydown.ctrl.enter="send" @keydown.meta.enter="send" />
@@ -636,13 +875,14 @@ onMounted(() => {
           <button v-else class="danger" @click="stop">停止</button>
         </div>
 
-        <!-- 底部控制栏（原版：联网 / 系统访问 / 推理级别 / 模型 / 发送） -->
+        <!-- 底部控制栏（原版：联网 / 权限级别 / 推理级别 / 模型 / 发送） -->
         <div class="flex-wrap" style="margin-top: 8px">
           <ModernComboBox v-model="onlineMode" :options="ONLINE_MODES" :width="120" />
-          <ModernComboBox v-model="accessLevel" :options="ACCESS_LEVELS" :width="120" />
+          <ModernComboBox v-model="permissionLevel" :options="PERMISSION_LEVELS" :width="120" />
           <ModernComboBox v-model="reasoningEffort" :options="REASONING_LEVELS" :width="120" />
           <ModernComboBox v-model="model" :options="modelOptions" watermark="模型选择" :width="200" editable />
           <span class="muted">{{ hasApiKey ? '密钥已配置' : '密钥未配置' }}</span>
+          <span class="muted">可用工具 {{ toolCatalog.length }} 个<template v-if="streaming && currentRound > 0"> · 第 {{ currentRound }}/{{ MAX_ROUNDS }} 轮</template></span>
         </div>
       </div>
     </div>

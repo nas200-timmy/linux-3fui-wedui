@@ -91,6 +91,19 @@ public sealed class AgentProxy
                 }
                 writer.WritePropertyName("messages");
                 messages.WriteTo(writer);
+                // tools / tool_choice 按需透传：Agent 工具化后由浏览器组装工具目录（含权限过滤）经这里转发。
+                // 不识别就不写这两个字段，保持旧行为。
+                if (root.TryGetProperty("tools", out var tools) && tools.ValueKind == JsonValueKind.Array)
+                {
+                    writer.WritePropertyName("tools");
+                    tools.WriteTo(writer);
+                }
+                if (root.TryGetProperty("tool_choice", out var toolChoice) &&
+                    toolChoice.ValueKind is JsonValueKind.String or JsonValueKind.Object)
+                {
+                    writer.WritePropertyName("tool_choice");
+                    toolChoice.WriteTo(writer);
+                }
                 writer.WriteEndObject();
             }
 
