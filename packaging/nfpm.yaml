@@ -80,8 +80,12 @@ overrides:
     # ffmpeg 在 Debian/Ubuntu 主源里 → 硬依赖；ICU/OpenSSL/zlib 是 self-contained .NET 的运行时依赖
     depends:
       - ffmpeg
-      - libicu76 | libicu74 | libicu72 | libicu70
-      - libssl3t64 | libssl3
+      # ICU：.NET 是 dlopen("libicuuc.so") + dlsym 按名解析，**不绑定 ICU 主版本**。
+      # 已实测 Debian 11 的 libicu67 与 Debian 12 的 libicu72 都能正常加载（见交接文档 §8.2）。
+      - libicu76 | libicu74 | libicu72 | libicu70 | libicu67
+      # OpenSSL：运行时探测列表含 libssl.so.1.1 与 libssl.so.3，两代都能用（已实测 1.1.1 的完整 TLS 握手）。
+      # libssl3t64 是 Debian 13 的 time_t 改名（t64 过渡）。
+      - libssl3t64 | libssl3 | libssl1.1
       - zlib1g
       - ca-certificates
       - tzdata
