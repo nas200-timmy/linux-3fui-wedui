@@ -115,6 +115,53 @@ export interface PerfHistory {
   cores: number[][] | null
 }
 
+// models.dev 厂商目录（/api/agent/catalog）：一个厂商的元数据，模型列表另取
+export interface CatalogProvider {
+  id: string
+  name: string
+  /** OpenAI 兼容 base URL；models.dev 对少数厂商省略 */
+  api: string | null
+  doc: string | null
+  env: string[] | null
+  /** 该厂商在 models.dev 里的模型数量 */
+  models: number
+}
+
+export interface ProviderCatalog {
+  fetchedAt: string
+  /** true＝网络不可用，返回的是数据目录里的过期缓存 */
+  stale: boolean
+  count: number
+  providers: CatalogProvider[]
+}
+
+export interface CatalogModel {
+  id: string
+  name: string | null
+  reasoning: boolean
+  toolCall: boolean
+  context: number | null
+  costIn: number | null
+  costOut: number | null
+  releaseDate: string | null
+}
+
+export interface ProviderModels {
+  id: string
+  stale: boolean
+  count: number
+  models: CatalogModel[]
+}
+
+/** /api/agent/scan：端点自身 /models 的扫描结果 */
+export interface ModelScanResult {
+  /** 真正取到模型列表的 API 基地址（探明前缀时带在末尾） */
+  endpoint: string
+  prefix: string
+  count: number
+  models: { id: string; ownedBy: string }[]
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -212,6 +259,12 @@ export const api = {
   agent: {
     config: () => request<{ endpoint: string; hasApiKey: boolean; model: string; reasoningEffort: string; extraHeaders: string }>('/api/agent/config'),
     saveConfig: (cfg: Record<string, unknown>) => request('/api/agent/config', { method: 'PUT', body: JSON.stringify(cfg) }),
+    // models.dev 厂商目录：refresh=true 绕过 24h 缓存强制重拉
+    catalog: (refresh = false) => request<ProviderCatalog>(`/api/agent/catalog${refresh ? '?refresh=1' : ''}`),
+    catalogModels: (providerId: string) => request<ProviderModels>(`/api/agent/catalog/${encodeURIComponent(providerId)}`),
+    // 从端点自身拉模型列表；不传字段即用服务端已保存的端点与密钥
+    scanModels: (payload: { endpoint?: string; apiKey?: string } = {}) =>
+      request<ModelScanResult>('/api/agent/scan', { method: 'POST', body: JSON.stringify(payload) }),
     chat: (messages: { role: string; content: string }[], model?: string, signal?: AbortSignal) =>
       fetch('/api/agent/chat', {
         method: 'POST',

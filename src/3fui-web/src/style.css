@@ -715,3 +715,34 @@ table.list td.actions { padding: 2px 10px; white-space: nowrap; }
 
 /* ── 第 12 轮：目录选择框文件模式 ── */
 .dir-picker-item.file::before { content: ''; margin-right: 0; }
+
+/* ── models.dev 厂商目录（Agent「模型管理」）── */
+.agent-doc-link { margin-left: 6px; color: var(--accent); text-decoration: none; }
+.agent-doc-link:hover { text-decoration: underline; }
+
+.provider-picker { display: flex; flex-direction: column; gap: 10px; }
+.provider-picker-bar { display: flex; align-items: center; gap: 8px; }
+.provider-picker-bar input[type='text'] { flex: 1; min-width: 0; }
+.provider-picker-list { max-height: 48vh; overflow: auto; border: 1px solid #2a2a2a; border-radius: var(--radius); padding: 4px 6px; }
+.provider-picker-group {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px 6px; cursor: pointer; position: sticky; top: 0; background: #1f1f1f; z-index: 1;
+}
+.provider-picker-group:hover { color: var(--text-strong); }
+.provider-picker-group-title { font-size: 12px; color: var(--text); }
+.provider-picker-group-toggle { font-size: 12px; color: var(--text-faint); }
+.provider-picker-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px 4px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;
+}
+.provider-picker-item:hover { background: var(--hover-control); }
+.provider-picker-item.active { background: var(--sel-l2); color: var(--text-strong); }
+.provider-picker-name,
+.provider-picker-id { flex: none; width: 148px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-picker-name { color: var(--text); }
+.provider-picker-id { color: var(--text-faint); }
+.provider-picker-count { flex: none; width: 72px; }
+.provider-picker-url { flex: 1; min-width: 0; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-picker-doc { flex: none; color: var(--accent); text-decoration: none; }
+.provider-picker-doc:hover { text-decoration: underline; }
+.provider-picker-empty { padding: 14px; text-align: center; color: #888888; font-size: 13px; }

@@ -31,6 +31,7 @@ builder.Services.AddSingleton<QueueRealtime>();
 builder.Services.AddSingleton<TlsManager>();
 builder.Services.AddSingleton<MediaProbe>();
 builder.Services.AddSingleton<AgentProxy>();
+builder.Services.AddSingleton<ModelsDevCatalog>();
 builder.Services.AddSingleton<PerfMonitor>();
 builder.Services.AddSingleton(new AuthService(config.DataDir));
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -45,6 +46,7 @@ var tls = app.Services.GetRequiredService<TlsManager>();
 var realtime = app.Services.GetRequiredService<QueueRealtime>();
 var mediaProbe = app.Services.GetRequiredService<MediaProbe>();
 var agentProxy = app.Services.GetRequiredService<AgentProxy>();
+var agentCatalog = app.Services.GetRequiredService<ModelsDevCatalog>();
 var perf = app.Services.GetRequiredService<PerfMonitor>();
 var auth = app.Services.GetRequiredService<AuthService>();
 var logger = app.Logger;
@@ -578,6 +580,48 @@ app.MapPut("/api/agent/config", async (HttpRequest request) =>
 
 app.MapPost("/api/agent/chat", (HttpContext context) =>
     agentProxy.ProxyChatAsync(context, app.Logger));
+
+// ── models.dev 厂商/模型目录（公开替代上游赞助者专用的 sp-agent-endpoints.json）──
+app.MapGet("/api/agent/catalog", async (HttpRequest request, CancellationToken cancellationToken) =>
+{
+    var (body, status) = await agentCatalog.GetProvidersAsync(request.Query.ContainsKey("refresh"), cancellationToken);
+    return Results.Json(body, JsonOptions.Compact, statusCode: status);
+});
+
+app.MapGet("/api/agent/catalog/{providerId}", async (string providerId, CancellationToken cancellationToken) =>
+{
+    var (body, status) = await agentCatalog.GetModelsAsync(providerId, cancellationToken);
+    return Results.Json(body, JsonOptions.Compact, statusCode: status);
+});
+
+// ── 扫描端点自身的模型列表（对齐上游 TryGetModelsAsync：无版本段时按 v1…v9、空前缀探测）──
+app.MapPost("/api/agent/scan", async (HttpRequest request, CancellationToken cancellationToken) =>
+{
+    AgentScanRequest? payload = null;
+    if (request.ContentLength is > 0)
+    {
+        try
+        {
+            payload = await request.ReadFromJsonAsync<AgentScanRequest>(JsonOptions.Compact);
+        }
+        catch (JsonException)
+        {
+            return Results.BadRequest(new { error = "请求 JSON 无效" });
+        }
+    }
+
+    var outcome = await agentProxy.ScanModelsAsync(payload?.endpoint, payload?.apiKey, cancellationToken);
+    if (!outcome.Ok)
+        return Results.Json(new { error = outcome.Error }, JsonOptions.Compact, statusCode: outcome.StatusCode);
+
+    return Results.Json(new
+    {
+        endpoint = outcome.Endpoint,
+        prefix = outcome.Prefix,
+        count = outcome.Models.Count,
+        models = outcome.Models.Select(model => new { id = model.Id, ownedBy = model.OwnedBy }),
+    }, JsonOptions.Compact);
+});
 #endregion
 
 #region 性能监控
@@ -679,4 +723,6 @@ internal sealed record SyncPresetRequest(List<string>? ids, 预设数据_v6 pres
 internal sealed record PresetPreviewRequest(预设数据_v6 preset, string? input, string? output);
 internal sealed record TlsUploadRequest(string certPem, string keyPem);
 internal sealed record AgentConfigRequest(string? endpoint, string? apiKey, string? model, string? reasoningEffort, string? extraHeaders);
+// 字段可省：省略即用服务端已保存的端点与密钥
+internal sealed record AgentScanRequest(string? endpoint, string? apiKey);
 internal sealed record EncoderSwitchRespondRequest(string 任务ID, string 选择);

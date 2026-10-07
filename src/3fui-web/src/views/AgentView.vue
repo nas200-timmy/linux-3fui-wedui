@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { api } from '../api'
+import { api, type CatalogModel, type CatalogProvider } from '../api'
 import { usePendingFiles, useToast } from '../store'
 import { marked } from '../markdown'
 import ModernComboBox from '../components/ModernComboBox.vue'
+import ProviderPickerDialog from '../components/ProviderPickerDialog.vue'
+import { providerBaseUrl, providerDocUrl } from '../providers'
 
 interface Message { role: 'user' | 'assistant'; content: string }
 interface Conversation { id: string; title: string; time: string; messages: Message[] }
@@ -43,22 +45,246 @@ const tokenCount = computed(() => Math.round(messages.value.reduce((sum, m) => s
 const TOKEN_BUDGET = 200000
 const tokenPercent = computed(() => Math.min(100, Math.round((tokenCount.value / TOKEN_BUDGET) * 100)))
 
-// ── 模型选择：可编辑下拉 + localStorage 记住用过的模型 ──
+// ── 模型管理：models.dev 厂商目录 + 端点实时扫描 ──
+// 上游（Lake1059/FFmpegFreeUI）的厂商清单来自赞助者专用的远端 sp-agent-endpoints.json，公开版拿不到；
+// 这里改用 models.dev 目录补厂商/base URL，模型候选仍以上游的「端点实时拉取」为主（标记「端点实时」）。
 const MODEL_HISTORY_KEY = 'linux-3fui-agent-models'
 const MODEL_PRESETS = ['deepseek-chat', 'kimi-k2-0905-preview', 'gpt-4o-mini', 'qwen-plus']
+const PROVIDER_KEY = 'linux-3fui-agent-provider'
+const CATALOG_KEY = 'linux-3fui-agent-catalog'
+const CATALOG_TTL = 24 * 3600 * 1000
+
 const modelHistory = ref<string[]>([])
-const modelOptions = computed(() => {
-  const known = [...modelHistory.value, ...MODEL_PRESETS]
-  return [...new Set(known.filter(Boolean))].map(v => ({ value: v, label: v }))
-})
-function loadModelHistory() {
-  try { modelHistory.value = JSON.parse(localStorage.getItem(MODEL_HISTORY_KEY) ?? '[]') as string[] } catch { modelHistory.value = [] }
+const catalog = ref<CatalogProvider[]>([])
+const catalogFetchedAt = ref('')
+const catalogStale = ref(false)
+const catalogLoading = ref(false)
+const providerId = ref('')
+const providerModels = ref<CatalogModel[]>([])
+const scannedModelIds = ref<string[]>([])
+const scanLoading = ref(false)
+const scanMessage = ref('')
+const showProviderPicker = ref(false)
+const apiKeyInput = ref('')
+const apiKeySaving = ref(false)
+const confirmClearKey = ref(false)
+
+const selectedProvider = computed(() => catalog.value.find(item => item.id === providerId.value) ?? null)
+const providerLabel = computed(() => selectedProvider.value?.name ?? '')
+const providerBase = computed(() => (selectedProvider.value === null ? '' : providerBaseUrl(selectedProvider.value)))
+const providerDoc = computed(() => (selectedProvider.value === null ? '' : providerDocUrl(selectedProvider.value)))
+const activeModel = computed(() => providerModels.value.find(item => item.id === model.value.trim()) ?? null)
+
+function describeModel(item: CatalogModel): string {
+  const parts: string[] = []
+  if (item.context) parts.push(`${Math.round(item.context / 1000)}K 上下文`)
+  if (item.costIn !== null && item.costOut !== null) parts.push(`$${item.costIn}/$${item.costOut} 每百万 token`)
+  if (item.reasoning) parts.push('支持推理级别')
+  return parts.join(' · ')
 }
+
+// 候选顺序对齐上游「模型来自端点、自定义补充」：端点实时 → 目录 → 用过 → 常用
+const modelOptions = computed(() => {
+  const options: { value: string; label: string; hint: string }[] = []
+  const seen = new Set<string>()
+  const add = (raw: string, source: string, detail = '') => {
+    const value = raw.trim()
+    if (value === '' || seen.has(value.toLowerCase())) return
+    seen.add(value.toLowerCase())
+    options.push({ value, label: value, hint: detail === '' ? source : `${source} · ${detail}` })
+  }
+  for (const id of scannedModelIds.value) add(id, '端点实时')
+  for (const item of providerModels.value) add(item.id, '模型目录', describeModel(item))
+  for (const id of modelHistory.value) add(id, '用过')
+  for (const id of MODEL_PRESETS) add(id, '常用')
+  return options
+})
+
+const modelSourceText = computed(() => {
+  const parts: string[] = []
+  if (scannedModelIds.value.length > 0) parts.push(`端点实时 ${scannedModelIds.value.length}`)
+  if (providerModels.value.length > 0) parts.push(`${providerLabel.value || '目录'} ${providerModels.value.length}`)
+  if (modelHistory.value.length > 0) parts.push(`用过 ${modelHistory.value.length}`)
+  return parts.join(' · ')
+})
+
+function loadModelHistory() {
+  try {
+    modelHistory.value = JSON.parse(localStorage.getItem(MODEL_HISTORY_KEY) ?? '[]') as string[]
+  } catch {
+    modelHistory.value = []
+  }
+}
+
 function rememberModel() {
   const m = model.value.trim()
   if (!m || modelHistory.value.includes(m)) return
   modelHistory.value = [m, ...modelHistory.value].slice(0, 12)
-  try { localStorage.setItem(MODEL_HISTORY_KEY, JSON.stringify(modelHistory.value)) } catch { /* 本地存储不可用时忽略 */ }
+  try {
+    localStorage.setItem(MODEL_HISTORY_KEY, JSON.stringify(modelHistory.value))
+  } catch { /* 本地存储不可用时忽略 */ }
+}
+
+// ── models.dev 厂商目录（服务端拉取 + 24h 缓存；浏览器再缓存一份，避免每次进页面都请求）──
+function readCachedCatalog(): { providers: CatalogProvider[]; fetchedAt: string; stale: boolean } | null {
+  try {
+    const raw = localStorage.getItem(CATALOG_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { providers?: CatalogProvider[]; fetchedAt?: string; stale?: boolean }
+    if (!Array.isArray(parsed.providers) || parsed.providers.length === 0) return null
+    const fetchedAt = parsed.fetchedAt ?? ''
+    const time = new Date(fetchedAt).getTime()
+    if (Number.isNaN(time) || Date.now() - time > CATALOG_TTL) return null
+    return { providers: parsed.providers, fetchedAt, stale: parsed.stale === true }
+  } catch {
+    return null
+  }
+}
+
+async function loadCatalog(force = false) {
+  if (!force) {
+    const cached = readCachedCatalog()
+    if (cached) {
+      catalog.value = cached.providers
+      catalogFetchedAt.value = cached.fetchedAt
+      catalogStale.value = cached.stale
+      inferProviderFromEndpoint()
+      return
+    }
+  }
+  catalogLoading.value = true
+  try {
+    const data = await api.agent.catalog(force)
+    catalog.value = data.providers ?? []
+    catalogFetchedAt.value = data.fetchedAt
+    catalogStale.value = data.stale
+    try {
+      localStorage.setItem(CATALOG_KEY, JSON.stringify({ providers: catalog.value, fetchedAt: data.fetchedAt, stale: data.stale }))
+    } catch { /* 本地存储不可用时忽略 */ }
+    inferProviderFromEndpoint()
+    toast.push('ok', force ? `厂商目录已刷新（${data.count} 家）` : `厂商目录已就绪（${data.count} 家）`)
+  } catch (error) {
+    toast.push('err', `厂商目录加载失败：${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    catalogLoading.value = false
+  }
+}
+
+async function loadProviderModels(id: string) {
+  try {
+    const data = await api.agent.catalogModels(id)
+    providerModels.value = data.models ?? []
+  } catch {
+    providerModels.value = []
+  }
+}
+
+function pickProvider(provider: CatalogProvider) {
+  showProviderPicker.value = false
+  providerId.value = provider.id
+  providerModels.value = []
+  try {
+    localStorage.setItem(PROVIDER_KEY, provider.id)
+  } catch { /* 本地存储不可用时忽略 */ }
+  const base = providerBaseUrl(provider)
+  if (base === '') {
+    toast.push('err', `${provider.name} 没有公开的兼容地址，请手填端点地址`)
+  } else {
+    endpoint.value = base
+    saveConfig(true)
+  }
+  void loadProviderModels(provider.id)
+}
+
+/** 没选过厂商时，按已保存的端点反查厂商（含 /v1 与不带 /v1 两种写法）。 */
+function inferProviderFromEndpoint() {
+  if (providerId.value !== '' || catalog.value.length === 0) return
+  const endpointValue = endpoint.value.trim()
+  if (endpointValue === '') return
+  const normalize = (value: string) => value.replace(/\/+$/, '').toLowerCase()
+  const target = normalize(endpointValue)
+  const same = (base: string) => {
+    const known = normalize(base)
+    return known !== '' && (known === target || `${known}/v1` === target || `${target}/v1` === known)
+  }
+  const hit = catalog.value.find(provider => same(providerBaseUrl(provider)))
+  if (!hit) return
+  providerId.value = hit.id
+  void loadProviderModels(hit.id)
+}
+
+function restoreProvider() {
+  try {
+    const saved = localStorage.getItem(PROVIDER_KEY) ?? ''
+    if (saved === '') return
+    providerId.value = saved
+    void loadProviderModels(saved)
+  } catch { /* 本地存储不可用时忽略 */ }
+}
+
+/** 从端点自身拉模型列表（上游 TryGetModelsAsync 的对应实现，密钥只在服务端使用）。 */
+async function scanEndpointModels() {
+  scanLoading.value = true
+  scanMessage.value = ''
+  try {
+    const endpointValue = endpoint.value.trim()
+    const keyValue = apiKeyInput.value.trim()
+    const data = await api.agent.scanModels({
+      endpoint: endpointValue === '' ? undefined : endpointValue,
+      apiKey: keyValue === '' ? undefined : keyValue,
+    })
+    scannedModelIds.value = data.models.map(item => item.id)
+    if (data.count === 0) {
+      scanMessage.value = '端点返回 0 个模型：这个 Key 下可能没有可用模型'
+    } else {
+      const first = data.models[0]
+      scanMessage.value = `端点返回 ${data.count} 个模型${data.prefix === '' ? '' : `（API 前缀 ${data.prefix}）`}`
+      if (model.value.trim() === '' && first) model.value = first.id
+    }
+    toast.push('ok', scanMessage.value)
+  } catch (error) {
+    scanMessage.value = error instanceof Error ? error.message : String(error)
+    toast.push('err', scanMessage.value)
+  } finally {
+    scanLoading.value = false
+  }
+}
+
+async function saveApiKey() {
+  const key = apiKeyInput.value.trim()
+  if (key === '') {
+    toast.push('err', '请先填入 API Key')
+    return
+  }
+  apiKeySaving.value = true
+  try {
+    await api.agent.saveConfig({ apiKey: key })
+    apiKeyInput.value = ''
+    hasApiKey.value = true
+    confirmClearKey.value = false
+    toast.push('ok', 'API Key 已保存到服务端（网页不回显明文）')
+  } catch (error) {
+    toast.push('err', error instanceof Error ? error.message : String(error))
+  } finally {
+    apiKeySaving.value = false
+  }
+}
+
+function clearApiKey() {
+  if (!confirmClearKey.value) {
+    confirmClearKey.value = true
+    window.setTimeout(() => { confirmClearKey.value = false }, 4000)
+    return
+  }
+  apiKeySaving.value = true
+  api.agent.saveConfig({ apiKey: '' })
+    .then(() => {
+      hasApiKey.value = false
+      confirmClearKey.value = false
+      toast.push('ok', 'API Key 已清除')
+    })
+    .catch(error => toast.push('err', error instanceof Error ? error.message : String(error)))
+    .finally(() => { apiKeySaving.value = false })
 }
 
 // ── 向 AI 发送文件（类）：文本读内容，其他附文件名/路径摘要，随下一条消息发出（服务端零改动）──
@@ -154,13 +380,14 @@ async function loadConfig() {
     hasApiKey.value = config.hasApiKey
     reasoningEffort.value = config.reasoningEffort
     if (config.reasoningEffort) accessLevel.value = '系统访问'
+    if (providerId.value === '' && config.endpoint !== '') inferProviderFromEndpoint()
   } catch { /* 配置可能尚未初始化 */ }
 }
 
-function saveConfig() {
+function saveConfig(silent = false) {
   api.agent.saveConfig({ endpoint: endpoint.value, model: model.value, reasoningEffort: reasoningEffort.value })
-    .then(() => { toast.push('ok', 'Agent 配置已保存'); loadConfig() })
-    .catch(error => toast.push('err', String(error)))
+    .then(() => { if (!silent) toast.push('ok', 'Agent 配置已保存') })
+    .catch(error => toast.push('err', error instanceof Error ? error.message : String(error)))
 }
 
 async function send() {
@@ -236,7 +463,13 @@ function stop() {
   abort.value?.abort()
 }
 
-onMounted(() => { load(); loadConfig(); loadModelHistory() })
+onMounted(() => {
+  load()
+  void loadConfig()
+  loadModelHistory()
+  restoreProvider()
+  void loadCatalog()
+})
 </script>
 
 <template>
@@ -294,32 +527,91 @@ onMounted(() => { load(); loadConfig(); loadModelHistory() })
       </div>
 
       <div v-if="showConfig" class="panel-box panel" style="margin-top: 10px">
-        <div class="panel-title">端点配置</div>
+        <div class="panel-title">模型管理</div>
+
         <div class="field-item">
-          <div class="field-label">端点地址</div>
-          <div class="field-control"><input v-model="endpoint" type="text" placeholder="如 https://api.deepseek.com/v1" /></div>
+          <div class="field-label">厂商</div>
+          <div class="field-control flex" style="gap: 6px; flex-wrap: wrap">
+            <button class="small" @click="showProviderPicker = true">{{ selectedProvider === null ? '选择厂商' : '更换厂商' }}</button>
+            <span class="muted" style="font-size: 12px">
+              {{ selectedProvider === null ? (catalog.length > 0 ? `目录收录 ${catalog.length} 家，国内知名优先` : '目录加载中…') : providerLabel }}
+            </span>
+            <button class="small plain" :disabled="catalogLoading" @click="loadCatalog(true)">{{ catalogLoading ? '刷新中…' : '刷新目录' }}</button>
+          </div>
         </div>
+
+        <div class="field-item" style="margin-top: 6px">
+          <div class="field-label">端点地址</div>
+          <div class="field-control">
+            <input v-model="endpoint" type="text" placeholder="如 https://api.deepseek.com/v1" />
+            <div class="muted" style="font-size: 12px; margin-top: 4px; line-height: 1.6">
+              <template v-if="providerBase">已按「{{ providerLabel }}」自动填写。本地 Ollama / LM Studio 改成 http://127.0.0.1:11434/v1 这类地址即可。</template>
+              <template v-else>选厂商会自动填端点；也可以直接手填任意 OpenAI 兼容地址。</template>
+              <a v-if="providerDoc" class="agent-doc-link" :href="providerDoc" target="_blank" rel="noopener noreferrer">文档 / 申请密钥</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="field-item" style="margin-top: 6px">
+          <div class="field-label">API Key</div>
+          <div class="field-control flex" style="gap: 6px; flex-wrap: wrap">
+            <input
+              v-model="apiKeyInput"
+              type="password"
+              autocomplete="off"
+              style="flex: 1; min-width: 150px"
+              :placeholder="hasApiKey ? '已配置，留空不修改' : '粘贴该厂商的 API Key'"
+            />
+            <button class="small primary" :disabled="apiKeySaving" @click="saveApiKey">保存密钥</button>
+            <button v-if="hasApiKey" class="small danger" :disabled="apiKeySaving" @click="clearApiKey">
+              {{ confirmClearKey ? '确认清除？' : '清除密钥' }}
+            </button>
+          </div>
+          <div class="muted" style="font-size: 12px; margin-top: 4px">
+            {{ hasApiKey ? '服务端已保存密钥，网页不回显明文。' : '尚未配置密钥，填入后保存在服务端 Settings.json。' }}
+          </div>
+        </div>
+
         <div class="field-item" style="margin-top: 6px">
           <div class="field-label">模型</div>
-          <div class="field-control"><input v-model="model" type="text" placeholder="如 deepseek-chat / kimi-k2" /></div>
+          <div class="field-control flex" style="gap: 6px; flex-wrap: wrap">
+            <ModernComboBox v-model="model" :options="modelOptions" watermark="模型 id" :width="230" editable />
+            <button class="small" :disabled="scanLoading" @click="scanEndpointModels">{{ scanLoading ? '扫描中…' : '扫描端点模型' }}</button>
+          </div>
+          <div class="muted" style="font-size: 12px; margin-top: 4px; line-height: 1.6">
+            {{ modelSourceText === '' ? '点「扫描端点模型」从端点拉取该 Key 下真实可用的模型。' : `候选来源：${modelSourceText}` }}
+            <template v-if="activeModel">· {{ describeModel(activeModel) }}</template>
+          </div>
         </div>
+
         <div class="field-item" style="margin-top: 6px">
           <div class="field-label">推理级别</div>
           <div class="field-control"><input v-model="reasoningEffort" type="text" placeholder="low / medium / high" /></div>
         </div>
-        <div class="muted" style="margin-top: 6px">API Key 在服务端 Settings.json 的 AgentApiKey 中配置，网页不回显密钥。</div>
-        <button class="small primary" style="margin-top: 8px" @click="saveConfig">保存</button>
+
+        <div v-if="scanMessage" class="muted" style="margin-top: 6px; font-size: 12px">{{ scanMessage }}</div>
+        <button class="small primary" style="margin-top: 8px" @click="saveConfig()">保存</button>
       </div>
 
       <div v-if="showTips" class="panel-box panel" style="margin-top: 10px">
         <div class="panel-title">操作提示</div>
         <div class="muted" style="line-height: 1.9">
-          ① 在「重载连接」里填好端点与模型；<br />
-          ② API Key 写到服务器 data/Settings.json 的 AgentApiKey；<br />
+          ① 「重载连接」→「模型管理」里选厂商（国内知名优先）自动填端点；<br />
+          ② 填 API Key 保存后点「扫描端点模型」，从端点拉真实可用模型；<br />
           ③ 输入问题后 Ctrl+Enter 发送，可随时停止；<br />
           ④ 对话记录保存在浏览器本地，不上传。
         </div>
       </div>
+
+      <ProviderPickerDialog
+        v-if="showProviderPicker"
+        :providers="catalog"
+        :selected="providerId"
+        :stale="catalogStale"
+        :fetched-at="catalogFetchedAt"
+        @close="showProviderPicker = false"
+        @pick="pickProvider"
+      />
     </div>
 
     <!-- 右列：聊天区 + 输入区 -->
@@ -350,7 +642,7 @@ onMounted(() => { load(); loadConfig(); loadModelHistory() })
           <ModernComboBox v-model="accessLevel" :options="ACCESS_LEVELS" :width="120" />
           <ModernComboBox v-model="reasoningEffort" :options="REASONING_LEVELS" :width="120" />
           <ModernComboBox v-model="model" :options="modelOptions" watermark="模型选择" :width="200" editable />
-          <span class="muted">{{ hasApiKey ? '密钥已配置' : '密钥未配置（服务端 Settings.json）' }}</span>
+          <span class="muted">{{ hasApiKey ? '密钥已配置' : '密钥未配置' }}</span>
         </div>
       </div>
     </div>
