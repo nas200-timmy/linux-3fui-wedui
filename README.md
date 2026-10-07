@@ -21,7 +21,8 @@ FFmpegFreeUI（3FUI）的 **Linux / 网页移植版**：为 NAS 打造的批量�
 ### Docker（推荐，NAS 通用）
 
 ```bash
-# 1. 修改 docker-compose.yml 中的媒体目录挂载
+# 1. 复制 .env.example 为 .env，填好 DATA_DIR（数据目录，建议放仓库外）与
+#    MEDIA_HOST_DIR（宿主媒体库目录）——compose 会自动读取，不用命令行传
 # 2. 环境检查 + 构建 + 启动 + 硬件验证一条龙（amd64 与 arm64 均可）
 ./tools/deploy.sh --build
 
