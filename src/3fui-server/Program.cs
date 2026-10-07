@@ -12,7 +12,19 @@ var config = ServerConfig.FromEnvironment();
 Directory.CreateDirectory(config.DataDir);
 设置_v6.启动时加载设置();
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = Directory.Exists(Path.Combine(AppContext.BaseDirectory, "wwwroot"))
+    ? WebApplication.CreateBuilder(new WebApplicationOptions
+      {
+          Args = args,
+          // 裸机部署关键：把静态根锚到**可执行文件同级**的 wwwroot（发布产物就在那里），
+          // 否则换个工作目录启动就找不到前端，页面只剩「前端未构建」兜底文案（实测过）。
+          // 开发态（dotnet run / 构建输出）该目录没有 wwwroot → 走默认分支，staticwebassets 清单照旧生效。
+          // 注意：必须用 CreateBuilder(WebApplicationOptions)；builder.WebHost.UseWebRoot() 会抛
+          // NotSupportedException("Changing the host configuration using WebApplicationBuilder.WebHost is not supported")。
+          WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot"),
+      })
+    : WebApplication.CreateBuilder(args);
+
 builder.Logging.ClearProviders();
 builder.Logging.AddSimpleConsole(options =>
 {

@@ -1,10 +1,12 @@
 name: Release
 
-# 打 tag（v0.1.0）→ 出四类产物并创建 GitHub Release：
+# 打 tag（v0.1.0）→ 出三类产物并创建 GitHub Release：
 #   ① ghcr.io 多架构镜像（linux/amd64 + linux/arm64）
-#   ② 单文件二进制 3fui-server-linux-x64 / -arm64（免安装，需宿主自带 ffmpeg）
-#   ③ 目录版 tar.gz（免安装、无 /tmp 自解压依赖，适合精简 NAS）
-#   ④ .deb / .rpm（amd64 + arm64，装到 /opt/linux-3fui，systemd 托管）
+#   ② 免安装 tar.gz（exe + wwwroot，宿主自带 ffmpeg/libicu 即可跑；换任意工作目录都能起）
+#      ⚠ 刻意不做"单文件二进制"：ASP.NET Core 的 wwwroot 不参与 single-file 打包（实测
+#        IncludeAllContentForSelfExtract=true 也收不进去），发出去就是个没界面的 exe。
+#        要真单文件得把前端做成嵌入资源，属另一件事。
+#   ③ .deb / .rpm（amd64 + arm64，装到 /opt/linux-3fui，systemd 托管）
 # workflow_dispatch 手动跑：只构建产物、不创建 Release（便于验证流水线）。
 on:
   push:
@@ -51,7 +53,10 @@ jobs:
             is_release=false
           else
             base="$(grep -oPm1 '(?<=<Version>)[^<]+' src/3fui-server/3fui-server.csproj)"
-            version="${base}.dev.${GITHUB_RUN_NUMBER}"
+            # ⚠ 预发布后缀必须用连字符：`0.1.0.dev.1` 这种「点号分 5 段」的版本号会让 NuGet restore
+            #   静默失败（error MSB4181: The "RestoreTask" task returned false but did not log an error），
+            #   本地/CI 现象完全一致，且不带任何可读原因——踩过一次，别改回去。
+            version="${base}-dev.${GITHUB_RUN_NUMBER}"
             is_release=false
           fi
           {
@@ -118,33 +123,32 @@ jobs:
             -p:Version=${{ needs.meta.outputs.version }} \
             -o publish
 
+      # 权限规整：打包结果不能依赖构建机的 umask（实测本机 umask 002 时 dll/wwwroot 会变成 0775）
+      - name: 规整权限
+        run: |
+          set -euo pipefail
+          find publish -type d -exec chmod 0755 {} +
+          find publish -type f -exec chmod 0644 {} +
+          chmod 0755 publish/3fui-server
+
       - name: 打目录版 tar.gz
         run: |
           set -euo pipefail
           mkdir -p dist
           tar -C publish -czf "dist/linux-3fui-${{ needs.meta.outputs.version }}-${{ matrix.rid }}.tar.gz" .
 
-      # 免安装单文件（给"就想丢一个文件跑起来"的场景）
-      - name: dotnet publish（单文件 → dist/3fui-server-${{ matrix.rid }}）
-        run: |
-          set -euo pipefail
-          dotnet publish src/3fui-server/3fui-server.csproj \
-            -c Release -r ${{ matrix.rid }} --self-contained true --nologo \
-            -p:Version=${{ needs.meta.outputs.version }} \
-            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
-            -o publish-single
-          cp publish-single/3fui-server "dist/3fui-server-${{ matrix.rid }}"
-          chmod +x "dist/3fui-server-${{ matrix.rid }}"
-
-      # 冒烟：真把服务起起来，验证 /api/status 与 SPA 首页（顺带验证 wwwroot 能被找到——
-      # 静态资源按 ContentRoot 解析，这里是"从别的目录启动"最容易出问题的地方）
-      - name: 冒烟测试（单文件：/api/status + 首页）
+      # 冒烟：解包 → **换个工作目录**启动 → 断言 /api/status 与 SPA 首页。
+      # 特意不在包目录里跑：ASP.NET Core 的 WebRoot 默认跟工作目录走，曾经换个目录启动就只剩
+      # "前端未构建"兜底页；Program.cs 现在会把静态根锚到可执行文件同级的 wwwroot，这条用例锁住该修复。
+      - name: 冒烟测试（解包后换目录启动：/api/status + SPA 首页）
         if: matrix.arch == 'amd64'   # arm64 产物无法在 x64 runner 上直接跑
         run: |
           set -euo pipefail
-          export DATA_DIR="$RUNNER_TEMP/data" HTTP_PORT=18080 HTTPS_PORT=18443
-          mkdir -p "$DATA_DIR"
-          "dist/3fui-server-${{ matrix.rid }}" > "$RUNNER_TEMP/server.log" 2>&1 &
+          mkdir -p "$RUNNER_TEMP/app" "$RUNNER_TEMP/data" "$RUNNER_TEMP/cwd"
+          tar -xzf "dist/linux-3fui-${{ needs.meta.outputs.version }}-${{ matrix.rid }}.tar.gz" -C "$RUNNER_TEMP/app"
+          cd "$RUNNER_TEMP/cwd"
+          DATA_DIR="$RUNNER_TEMP/data" HTTP_PORT=18080 HTTPS_PORT=18443 \
+            "$RUNNER_TEMP/app/3fui-server" > "$RUNNER_TEMP/server.log" 2>&1 &
           pid=$!
           ok=0
           for _ in $(seq 1 40); do
@@ -161,8 +165,10 @@ jobs:
           grep -q 'linux-3fui' "$RUNNER_TEMP/status.json"
           curl -fsS "http://127.0.0.1:18080/" -o "$RUNNER_TEMP/index.html"
           grep -qi 'id="app"' "$RUNNER_TEMP/index.html"   # 必须是构建好的 SPA，不是"前端未构建"兜底页
+          asset="$(grep -o '/assets/[^"]*\.js' "$RUNNER_TEMP/index.html" | head -1)"
+          curl -fsS "http://127.0.0.1:18080${asset}" -o /dev/null
           kill "$pid" 2>/dev/null || true
-          echo "冒烟通过：/api/status + SPA 首页"
+          echo "冒烟通过：换目录启动仍能出 SPA 首页，静态资源 ${asset} 也 200"
 
       - name: 安装 nfpm
         run: |
@@ -278,9 +284,8 @@ jobs:
           ### ③ 免安装（宿主已自带 ffmpeg/ffprobe 与 libicu）
           \`\`\`bash
           tar -xzf linux-3fui-${V}-linux-x64.tar.gz -C /opt/linux-3fui
-          cd /opt/linux-3fui && MEDIA_ROOT=/你的媒体库 ./3fui-server
-          # 单文件版：./3fui-server-linux-x64（首次启动把原生库自解压到 /tmp；
-          # 若 /tmp 挂载是 noexec，请改用上面 tar.gz 目录版或设 DOTNET_BUNDLE_EXTRACT_BASE_DIR）
+          MEDIA_ROOT=/你的媒体库 /opt/linux-3fui/3fui-server
+          # 工作目录任意；数据默认落在可执行文件同级的 data/，可用 DATA_DIR 覆盖
           \`\`\`
 
           打开 \`http://<主机IP>:8080\`。硬件加速（VAAPI/QSV/NVENC）需要宿主 /dev/dri 与对应驱动，见 README「裸机部署」。

@@ -69,21 +69,19 @@ sudo systemctl restart linux-3fui
 | VA-API / QSV 驱动 | 要做硬编才需要：宿主 `/dev/dri` + 对应用户态驱动；服务用户已自动加入 `video`/`render` 组 |
 | 端口 | 8080 HTTP、8443 HTTPS、10591/UDP（与 Windows 版 3FUI 的远程调用协议一致） |
 
-### ④ 免安装（tar.gz 目录版 / 单文件）
+### ④ 免安装（tar.gz，解包即用）
 
 ```bash
-# 目录版（推荐：无自解压依赖，适合各种精简 NAS 系统）
 tar -xzf linux-3fui-<版本>-linux-x64.tar.gz -C /opt/linux-3fui
-cd /opt/linux-3fui && MEDIA_ROOT=/你的媒体库 ./3fui-server
-
-# 单文件版（就丢一个文件跑；首次启动会把原生库自解压到 /tmp，
-# 若 /tmp 挂载是 noexec，请改用目录版或设 DOTNET_BUNDLE_EXTRACT_BASE_DIR 到可执行目录）
-chmod +x 3fui-server-linux-x64
-MEDIA_ROOT=/你的媒体库 ./3fui-server-linux-x64
+MEDIA_ROOT=/你的媒体库 /opt/linux-3fui/3fui-server
 ```
 
-同样需要宿主自带 `ffmpeg`/`ffprobe` 与 `libicu`。注意静态前端按进程工作目录解析，
-**请在解包目录里启动**（从别的目录启动会拿不到 `wwwroot`，页面只剩"前端未构建"提示）。
+需要宿主自带 `ffmpeg`/`ffprobe` 与 `libicu`。数据默认落在**可执行文件同级**的 `data/`（用 `DATA_DIR` 可改），
+静态前端也按可执行文件同级目录解析，**工作目录在哪都行**。
+
+> 没有"单文件二进制"这个产物：ASP.NET Core 的 `wwwroot` 不参与 single-file 打包（实测连
+> `IncludeAllContentForSelfExtract=true` 也收不进去），单文件发出来会是个没有界面的 exe。
+> 想彻底单文件，需要把前端做成嵌入资源（改动在服务端，另说）。
 
 **装完都一样：**
 1. 「设置」→ 上传证书（cert.pem + key.pem）启用 HTTPS
