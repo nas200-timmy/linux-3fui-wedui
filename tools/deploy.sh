@@ -121,66 +121,135 @@ else
     fi
 fi
 
-# 组比对与自动修正（渲染后的有效配置 = 受版本控制的 compose + 本机 override）
-if [ -n "$RENDER_GID" ] && [ -d /dev/dri ] && command -v python3 >/dev/null; then
-    # 去重后的有效 group_add：compose 的列表合并语义（替换/追加）不确定，这里按集合判断
-    effective_groups() {
+# ── 组比对与自动修正（有效配置 = 受版本控制的 compose + 本机 override）──
+# ⚠ compose 对列表是**合并**语义：override 里把 compose 已有的 GID 再写一遍 → 重复项 →
+#   `docker compose config` 直接报 `items at 0 and 2 are equal`，整条部署中止（虚拟机实测踩过）。
+#   所以这里**只写缺失的 GID**，并在写完后校验"无重复且无缺失"。
+OUR_OVERRIDE_MARK='# 由 tools/deploy.sh 生成'
+if [ -n "$RENDER_GID" ] && command -v python3 >/dev/null; then
+    groups_json() {   # $1 = raw（原始，含重复）| dedup（去重）
         compose_json | python3 -c "
 import json,sys
+mode = '$1'
 try:
-    g=[str(x) for x in (json.load(sys.stdin)['services']['linux-3fui-2'].get('group_add') or [])]
+    g = [str(x) for x in (json.load(sys.stdin)['services']['linux-3fui-2'].get('group_add') or [])]
 except Exception:
-    g=[]
-seen=set(); out=[]
-for x in g:
-    if x not in seen:
-        seen.add(x); out.append(x)
-print(' '.join(out))
+    g = []
+if mode == 'raw':
+    print(' '.join(g))
+else:
+    seen = set(); out = []
+    for x in g:
+        if x not in seen:
+            seen.add(x); out.append(x)
+    print(' '.join(out))
 " 2>/dev/null
     }
-    cur_groups="$(effective_groups)"
-    if [ -z "$cur_groups" ]; then
-        warn "compose 未配置 group_add——容器内可能无权访问 /dev/dri 设备节点"
-    else
-        missing=""
+
+    if ! compose_json >/dev/null 2>&1; then
+        # 关键：compose_json 内部把 stderr 丢了，这里单独再抓一次原始报错
+        cerr="$(docker compose config --format json 2>&1 >/dev/null | tail -4 | tr '\n' ' ')"
+        # 渲染不出来时，仍可从**受版本控制的 compose** 里数出已有 GID（注意行尾可能有中文注释）
+        # 只认"整行就是一串数字的列表项"，本仓库只有 group_add 是这种形状（ports 带冒号、devices 带路径）
+        tracked_groups="$(grep -oE '^[[:space:]]*-[[:space:]]*"?[0-9]+"?[[:space:]]*(#.*)?$' docker-compose.yml 2>/dev/null \
+                          | grep -oE '[0-9]+' | tr '\n' ' ')"
+        need=""
         for g in "${VIDEO_GID:-44}" "$RENDER_GID"; do
-            case " $cur_groups " in *" $g "*) ;; *) missing="$missing $g" ;; esac
+            case " $tracked_groups " in *" $g "*) ;; *) need="$need $g" ;; esac
         done
-        if [ -z "$missing" ]; then
-            pass "compose group_add=[$cur_groups] 已覆盖宿主 video=${VIDEO_GID:-44} render=${RENDER_GID}"
-        else
-            warn "compose group_add=[$cur_groups] 缺少宿主组：$missing"
-            do_fix=0
-            if [ "$ASSUME_YES" = 1 ]; then
-                do_fix=1
+        need="${need# }"
+        ovr=docker-compose.override.yml
+        if [ -f "$ovr" ] && grep -qF "$OUR_OVERRIDE_MARK" "$ovr" && [ -n "$need" ]; then
+            # 是我们自己早先写坏的 override（把 compose 已有的 GID 又写了一遍）→ 直接改成只补缺失的
+            {
+                echo "$OUR_OVERRIDE_MARK：本机 video/render 组 GID 适配（每机不同，已被 .gitignore 忽略）"
+                echo "services:"
+                echo "  linux-3fui-2:"
+                echo "    group_add:"
+                for g in $need; do echo "      - \"$g\""; done
+            } > "$ovr"
+            if compose_json >/dev/null 2>&1; then
+                pass "检测到自家 override 与 compose 重复（导致 compose 校验失败），已重写为只补缺失的 GID：$need"
             else
-                printf '  是否写入 docker-compose.override.yml 做本机适配？[y/N] '
-                read -r ans
-                case "$ans" in y|Y|yes|YES) do_fix=1 ;; *) do_fix=0 ;; esac
+                note_fail "重写 $ovr 后 compose 仍渲染失败：$cerr"
             fi
-            if [ "$do_fix" = 1 ]; then
-                # 写 override 而不是 sed 改 docker-compose.yml：GID 是每台机器不同的本地配置，
-                # 改受版本控制的文件会让部署机工作区永久 dirty、之后 git pull 必冲突。
-                cat > docker-compose.override.yml <<EOF
-# 由 tools/deploy.sh 生成：本机 video/render 组 GID 适配（每台机器不同，已被 .gitignore 忽略）
-services:
-  linux-3fui-2:
-    group_add:
-      - "${VIDEO_GID:-44}"
-      - "${RENDER_GID}"
-EOF
-                new_groups="$(effective_groups)"
-                still_missing=""
-                for g in "${VIDEO_GID:-44}" "$RENDER_GID"; do
-                    case " $new_groups " in *" $g "*) ;; *) still_missing="$still_missing $g" ;; esac
-                done
-                if [ -z "$still_missing" ]; then
-                    pass "已写入 docker-compose.override.yml，有效 group_add=[$new_groups]"
-                else
-                    note_fail "写入 override 后仍缺组:$still_missing（compose 结构可能已变化），请人工检查 docker-compose.override.yml"
-                fi
+        elif [ ! -f "$ovr" ]; then
+            note_fail "docker compose config 渲染失败：$cerr（不是 override 的问题，检查 docker-compose.yml 本身）"
+        else
+            note_fail "docker compose config 渲染失败：$cerr
+    若报 \"items at N and M are equal\"，是 $ovr 与 docker-compose.yml 的 group_add 重复了同一个 GID。
+    override 只应写**缺失的** GID（本机需要补的是：${need:-无}）：
+    services:
+      linux-3fui-2:
+        group_add:
+$(for g in $need; do printf '          - "%s"\n' "$g"; done)
+    改完重跑 ./tools/deploy.sh --yes"
+        fi
+    else
+        raw_groups="$(groups_json raw)"
+        cur_groups="$(groups_json dedup)"
+        dup=0
+        [ "$raw_groups" != "$cur_groups" ] && dup=1
+        if [ -z "$cur_groups" ]; then
+            warn "compose 未配置 group_add——容器内可能无权访问 /dev/dri 设备节点"
+        else
+            missing=""
+            for g in "${VIDEO_GID:-44}" "$RENDER_GID"; do
+                case " $cur_groups " in *" $g "*) ;; *) missing="$missing $g" ;; esac
+            done
+            missing="${missing# }"
+            if [ -z "$missing" ] && [ "$dup" = 0 ]; then
+                pass "compose group_add=[$cur_groups] 已覆盖宿主 video=${VIDEO_GID:-44} render=${RENDER_GID}"
             else
-                note_fail "group_add 未适配，容器硬件访问会失败（稍后可重跑 ./tools/deploy.sh --yes）"
+                [ "$dup" = 1 ] && warn "有效 group_add 含重复项：[$raw_groups]（compose 会报 items at N and M are equal）"
+                [ -n "$missing" ] && warn "compose group_add=[$cur_groups] 缺少宿主组：$missing"
+                do_fix=0
+                if [ "$ASSUME_YES" = 1 ]; then
+                    do_fix=1
+                else
+                    printf '  是否写入 docker-compose.override.yml 做本机适配？[y/N] '
+                    read -r ans
+                    case "$ans" in y|Y|yes|YES) do_fix=1 ;; *) do_fix=0 ;; esac
+                fi
+                if [ "$do_fix" = 1 ]; then
+                    ovr=docker-compose.override.yml
+                    if [ -f "$ovr" ] && ! grep -qF "$OUR_OVERRIDE_MARK" "$ovr"; then
+                        note_fail "$ovr 是手写的（没有本脚本的标记），不覆盖它。请改成只含缺失的 GID：
+    services:
+      linux-3fui-2:
+        group_add:
+$(for g in $missing; do printf '          - "%s"\n' "$g"; done)"
+                    elif [ -z "$missing" ]; then
+                        # 缺失组为空但仍有重复项 → 说明是我们自己早先写坏的 override，移走它
+                        if [ -f "$ovr" ]; then
+                            mv "$ovr" "$ovr.bak"
+                            pass "缺失组为空，已把旧 override 备份为 $ovr.bak 并移除（消除重复项）"
+                        fi
+                    else
+                        # 只写缺失的 GID —— 重复项会让 compose 校验直接失败，这是本脚本早期版本的 bug
+                        {
+                            echo "$OUR_OVERRIDE_MARK：本机 video/render 组 GID 适配（每机不同，已被 .gitignore 忽略）"
+                            echo "services:"
+                            echo "  linux-3fui-2:"
+                            echo "    group_add:"
+                            for g in $missing; do echo "      - \"$g\""; done
+                        } > "$ovr"
+                        new_raw="$(groups_json raw)"; new_cur="$(groups_json dedup)"
+                        still=""
+                        for g in "${VIDEO_GID:-44}" "$RENDER_GID"; do
+                            case " $new_cur " in *" $g "*) ;; *) still="$still $g" ;; esac
+                        done
+                        if [ -n "$still" ]; then
+                            note_fail "写入 override 后仍缺组:$still（compose 结构可能已变化），请人工检查 $ovr"
+                        elif [ "$new_raw" != "$new_cur" ]; then
+                            note_fail "写入 override 后仍有重复项（[$new_raw]），请人工检查 $ovr"
+                        else
+                            pass "已写入 $ovr（只补缺失的 GID：$missing），有效 group_add=[$new_cur]"
+                        fi
+                    fi
+                else
+                    note_fail "group_add 未适配，容器硬件访问会失败（稍后可重跑 ./tools/deploy.sh --yes）"
+                fi
             fi
         fi
     fi

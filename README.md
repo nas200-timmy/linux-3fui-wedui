@@ -133,7 +133,31 @@ Docker 内自带 Debian 官方 ffmpeg（含 VAAPI/QSV）。使用硬件编码时
 - **NVIDIA NVENC**：宿主机安装 NVIDIA Container Toolkit，compose 中取消注释 `runtime: nvidia`
 - **arm64 NAS**：镜像支持 amd64/arm64 双架构构建；Intel 专属驱动（oneVPL/iHD/libmfx）仅 amd64 安装，arm64 下 QSV 不可用属预期，VAAPI 由 mesa 通用驱动提供
 
+**虚拟机 / 无核显直通时**：宿主可能只有 `/dev/dri/card0`、没有 `renderD128`（Hyper-V、VMware 等虚拟显卡就是这种情况）。
+此时 `libva` 找不到驱动，**QSV/VAAPI 不可用属宿主限制**——`tools/check-hw.sh` 会把这类项报成 **SKIP 而不是 FAIL**，
+并额外跑一条 **CPU 软编探针**（libx264）证明镜像与 ffmpeg 本身正常。要硬编就得把 GPU 直通给虚拟机（或换物理机/NAS）。
+
+**HTTPS 与 API 探针口径**：`check-hw.sh` 默认探 `http://127.0.0.1:8080/api/auth/status`（与容器健康检查同口径）。
+证书没上传时 8443 本来就不响应，脚本只会给一句提示，不算失败。
+
 编码器参数面板沿用 Windows 版编码器数据库（参数生成完全一致），可用性取决于镜像内 ffmpeg 的编译选项；也可通过「设置 → 替代进程文件名」挂载宿主机 ffmpeg 包装脚本。
+
+## 网络慢 / 拉不动镜像？（国内常见）
+
+`ghcr.io` 在国内直连经常只有 100–300 KB/s，400+ MB 的镜像半小时都拉不完，而且**客户端超时后已下载的层会被清空重来**。
+一些网络环境下 `docker.io` 的认证接口也不通，所以「就地构建」这条路可能直接不可行（基础镜像 `node:22`、`dotnet/sdk` 都拉不到）——
+这时**用预构建镜像 + 镜像加速站**是最省事的：
+
+```bash
+# 例：南京大学镜像站（实测 ~9MB/s，31 秒拉完 424MB）
+docker pull ghcr.nju.edu.cn/nas200-timmy/linux-3fui-wedui:latest
+docker tag  ghcr.nju.edu.cn/nas200-timmy/linux-3fui-wedui:latest \
+            ghcr.io/nas200-timmy/linux-3fui-wedui:latest     # 让 compose 里的 image 也能命中
+docker compose up -d
+```
+
+其他镜像源同理（如各家的 ghcr 代理），把 `docker-compose.yml` 的 `image:` 或 `.env` 里的值换掉即可；
+`tools/check-hw.sh` 也支持 `IMAGE=<完整镜像名>` 覆盖，镜像不存在时它只会提示，不会去 `docker.io` 瞎拉。
 
 ## 与 Windows 版 3FUI 的差异
 
