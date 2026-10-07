@@ -16,6 +16,20 @@ FFmpegFreeUI（3FUI）的 **Linux / 网页移植版**：为 NAS 打造的批量�
   **harness 通告**：任务开始/进度/报错/编码器切换会以 `⚙ harness 通知` 主动播报给 Agent（可开关）；
   另有内置技能资料库（参数面板/命令行自检/滤镜与流控制/队列/硬件编码器）供 Agent 自查
 
+## 界面预览
+
+截图取自**真实运行实例**（本机 Linux + ffmpeg 7.1.5，队列里真在跑一个 x265 任务；测试机无独显，所以 GPU 显示「未检测」）。
+点击图片可看原尺寸。
+
+|  |  |
+|---|---|
+| [![起始页面](docs/images/home.png)](docs/images/home.png) | [![编码队列](docs/images/queue.png)](docs/images/queue.png) |
+| **起始页面**：小白默认流程（准备文件 → 选编码器 → 定质量 → 入队）、环境状态、内置预设推荐 | **编码队列**：当前/下一个徽标、进度与效率、大小预估、底部 ffmpeg 实时输出条 |
+| [![参数面板 · 编码器](docs/images/preset-encoder.png)](docs/images/preset-encoder.png) | [![参数面板 · 画面帧](docs/images/preset-frame.png)](docs/images/preset-frame.png) |
+| **参数面板 · 编码器**：先选类别再选具体编码，字段右侧是与原版一致的参数说明 | **参数面板 · 画面帧**：复刻原版的二级窗口——分辨率/帧率/增强按块展开 |
+| [![性能监控](docs/images/perf.png)](docs/images/perf.png) | [![Agent 智能体](docs/images/agent.png)](docs/images/agent.png) |
+| **性能监控**：CPU/内存/磁盘/网络卡片 + 实时曲线 + ffmpeg 进程占用 | **Agent 智能体**：模型管理（models.dev 厂商目录 / 端点 / 密钥 / 模型扫描） |
+
 ## 快速开始
 
 四种装法，按场景选一种（都自带网页前端）。版本号与下载地址见
